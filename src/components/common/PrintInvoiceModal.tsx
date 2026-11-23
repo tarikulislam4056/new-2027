@@ -249,7 +249,7 @@ export const PrintInvoiceModal: React.FC = () => {
   const handlePrint = () => {
     const isThermal = printFormat === 'POS_80MM' || printFormat === 'XPRINTER_80MM';
     printElement(printContentRef.current, {
-      documentTitle: title || docTitle || 'DokanPro Document',
+      documentTitle: title || docTitle || companySettings.name || 'DokanPro Document',
       isThermal80mm: isThermal,
       isLandscape: !isThermal && printOrientation === 'LANDSCAPE',
     });
@@ -266,7 +266,8 @@ export const PrintInvoiceModal: React.FC = () => {
       const success = await exportElementToPdf(
         printContentRef.current, 
         fileName,
-        !isThermal && printOrientation === 'LANDSCAPE'
+        !isThermal && printOrientation === 'LANDSCAPE',
+        companySettings.name || 'DokanPro ERP'
       );
       if (success) {
         if (showToast) {
@@ -3576,74 +3577,6 @@ export const PrintInvoiceModal: React.FC = () => {
               </div>
             ) : (
               <div className={`printable-report block mx-auto w-full ${printOrientation === 'LANDSCAPE' ? 'max-w-[1200px]' : 'max-w-[950px]'} bg-white text-black p-6 md:p-8 shadow-xl border border-zinc-200 rounded-sm font-sans print:block print:shadow-none print:border-none print:p-0 print:w-full print:max-w-none print:min-h-0 print:h-auto`}>
-                {/* Top Header */}
-                <div className="flex justify-between items-start border-b-2 border-zinc-900 pb-2.5 mb-3">
-                  <div className="flex items-start gap-3">
-                    {companySettings.logoUrl ? (
-                      <img
-                        src={companySettings.logoUrl}
-                        alt={companySettings.name || 'Store Logo'}
-                        className="h-11 w-auto object-contain shrink-0"
-                        onError={(e) => { (e.currentTarget as HTMLElement).style.display = 'none'; }}
-                      />
-                    ) : (
-                      <div
-                        className="px-2.5 py-1.5 flex items-center justify-center rounded-xs"
-                        style={{ backgroundColor: invoiceTheme.primary, color: invoiceTheme.textColor }}
-                      >
-                        <span className="text-base font-serif font-black tracking-wider">
-                          {companySettings.name ? companySettings.name.slice(0, 3).toUpperCase() : 'POS'}
-                        </span>
-                      </div>
-                    )}
-                    <div>
-                      <h1 className="text-lg font-bold uppercase tracking-wider text-black font-serif leading-tight">
-                        {companySettings.name || 'DokanPro ERP'}
-                      </h1>
-                      {companySettings.nameBn && (
-                        <p className="text-xs text-black font-bold leading-tight">{companySettings.nameBn}</p>
-                      )}
-                      {companySettings.address && (
-                        <p className="text-[11px] text-black leading-tight">{companySettings.address}</p>
-                      )}
-                      {companySettings.phone && (
-                        <p className="text-[11px] text-black leading-tight">
-                          Phone: {companySettings.phone} {companySettings.email ? `• ${companySettings.email}` : ''}
-                        </p>
-                      )}
-                    </div>
-                  </div>
-
-                  <div className="text-right text-[11px] leading-snug text-black">
-                    <div className="text-black font-semibold">
-                      Period: {data.period || 'All Time'}
-                    </div>
-                    <div className="text-black mt-0.5">
-                      Date: {data.generatedDate || printToday}
-                    </div>
-                    <div className="text-black font-bold mt-0.5">
-                      Total Items: {effectiveProductList.length.toLocaleString()}
-                    </div>
-                  </div>
-                </div>
-
-                {/* Centered Report Title Banner */}
-                <div className="text-center my-2.5">
-                  <div
-                    className="inline-block px-6 py-1.5 text-sm md:text-base font-black tracking-widest uppercase font-serif rounded-xs shadow-xs"
-                    style={{ backgroundColor: invoiceTheme.primary, color: invoiceTheme.textColor }}
-                  >
-                    {data.reportHeading || title || 'PRODUCT STOCK & VALUATION REPORT'}
-                  </div>
-                  {(includeAllProductsInPrint ? (language === 'bn' ? 'সকল সক্রিয় পণ্য (All Inventory)' : 'All Inventory Products') : data.filterTag) && (
-                    <div className="text-[10px] text-black mt-1 font-medium">
-                      {includeAllProductsInPrint
-                        ? (language === 'bn' ? 'সকল সক্রিয় পণ্য (All Inventory)' : 'All Inventory Products')
-                        : data.filterTag}
-                    </div>
-                  )}
-                </div>
-
                 {/* Products Table — flows naturally across unlimited pages with repeating thead and intact rows */}
                 <div className="w-full overflow-x-auto print:overflow-visible">
                 <table className={`w-full text-left border-collapse ${
@@ -3652,6 +3585,80 @@ export const PrintInvoiceModal: React.FC = () => {
                     : printOrientation === 'LANDSCAPE' ? 'text-[9px]' : 'text-[8px]'
                 } leading-snug mb-3 text-black`}>
                   <thead className="print:table-header-group">
+                    {/* 1. Page-Repeating Company Information & Report Title */}
+                    <tr className="bg-white text-black border-b-2 border-zinc-900" style={{ pageBreakInside: 'avoid', breakInside: 'avoid' }}>
+                      <th colSpan={isPharmacyMode ? 15 : 12} className="p-0 font-normal text-left pb-2">
+                        {/* Top Header */}
+                        <div className="flex justify-between items-start pb-2.5 mb-2 border-b border-zinc-200">
+                          <div className="flex items-start gap-3">
+                            {companySettings.logoUrl ? (
+                              <img
+                                src={companySettings.logoUrl}
+                                alt={companySettings.name || 'Store Logo'}
+                                className="h-11 w-auto object-contain shrink-0"
+                                onError={(e) => { (e.currentTarget as HTMLElement).style.display = 'none'; }}
+                              />
+                            ) : (
+                              <div
+                                className="px-2.5 py-1.5 flex items-center justify-center rounded-xs"
+                                style={{ backgroundColor: invoiceTheme.primary, color: invoiceTheme.textColor }}
+                              >
+                                <span className="text-base font-serif font-black tracking-wider">
+                                  {companySettings.name ? companySettings.name.slice(0, 3).toUpperCase() : 'POS'}
+                                </span>
+                              </div>
+                            )}
+                            <div>
+                              <h1 className="text-lg font-bold uppercase tracking-wider text-black font-serif leading-tight">
+                                {companySettings.name || 'DokanPro ERP'}
+                              </h1>
+                              {companySettings.nameBn && (
+                                <p className="text-xs text-black font-bold leading-tight">{companySettings.nameBn}</p>
+                              )}
+                              {companySettings.address && (
+                                <p className="text-[11px] text-black leading-tight">{companySettings.address}</p>
+                              )}
+                              {companySettings.phone && (
+                                <p className="text-[11px] text-black leading-tight">
+                                  Phone: {companySettings.phone} {companySettings.email ? `• ${companySettings.email}` : ''}
+                                </p>
+                              )}
+                            </div>
+                          </div>
+
+                          <div className="text-right text-[11px] leading-snug text-black">
+                            <div className="text-black font-semibold">
+                              Period: {data.period || 'All Time'}
+                            </div>
+                            <div className="text-black mt-0.5">
+                              Date: {data.generatedDate || printToday}
+                            </div>
+                            <div className="text-black font-bold mt-0.5">
+                              Total Items: {effectiveProductList.length.toLocaleString()}
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Centered Report Title Banner */}
+                        <div className="text-center my-2">
+                          <div
+                            className="inline-block px-6 py-1.5 text-sm md:text-base font-black tracking-widest uppercase font-serif rounded-xs shadow-xs"
+                            style={{ backgroundColor: invoiceTheme.primary, color: invoiceTheme.textColor }}
+                          >
+                            {data.reportHeading || title || 'PRODUCT STOCK & VALUATION REPORT'}
+                          </div>
+                          {(includeAllProductsInPrint ? (language === 'bn' ? 'সকল সক্রিয় পণ্য (All Inventory)' : 'All Inventory Products') : data.filterTag) && (
+                            <div className="text-[10px] text-black mt-1 font-medium">
+                              {includeAllProductsInPrint
+                                ? (language === 'bn' ? 'সকল সক্রিয় পণ্য (All Inventory)' : 'All Inventory Products')
+                                : data.filterTag}
+                            </div>
+                          )}
+                        </div>
+                      </th>
+                    </tr>
+
+                    {/* 2. Column Headers Row */}
                     <tr
                       className="font-semibold"
                       style={{ backgroundColor: invoiceTheme.primary, color: invoiceTheme.textColor }}
@@ -3751,6 +3758,11 @@ export const PrintInvoiceModal: React.FC = () => {
                       </td>
                       <td className="py-2 px-1 text-center font-mono font-bold text-black whitespace-nowrap">{effectiveProductTotalUnits.toLocaleString()}</td>
                       <td className="py-2 px-1 text-right font-mono font-bold text-black whitespace-nowrap">৳{effectiveProductTotalCostValue.toLocaleString()}</td>
+                    </tr>
+                    <tr className="border-t border-zinc-300 text-[9px] text-zinc-600 print:text-black">
+                      <td colSpan={isPharmacyMode ? 15 : 12} className="py-1.5 px-2 text-center font-mono">
+                        {companySettings.name || 'DokanPro ERP'} • Computer Generated Inventory Report • {data.generatedDate || printToday}
+                      </td>
                     </tr>
                   </tfoot>
                 </table>
@@ -5043,66 +5055,70 @@ export const PrintInvoiceModal: React.FC = () => {
             ) : (
               <div className={`printable-report w-full ${printOrientation === 'LANDSCAPE' ? 'max-w-[1200px]' : 'max-w-[950px]'} bg-white text-black p-8 md:p-10 shadow-xl border border-zinc-200 rounded-sm font-sans flex flex-col justify-between min-h-[1080px] print:shadow-none print:border-none print:p-6 print:w-full print:max-w-none print:min-h-screen`}>
                 <div>
-                  {/* Header */}
-                  <div className="flex justify-between items-start border-b-2 border-zinc-900 pb-3 mb-4">
-                    <div className="flex items-start gap-3">
-                      {companySettings.logoUrl ? (
-                        <img
-                          src={companySettings.logoUrl}
-                          alt={companySettings.name || 'Store Logo'}
-                          className="h-12 w-auto object-contain shrink-0"
-                          onError={(e) => { (e.currentTarget as HTMLElement).style.display = 'none'; }}
-                        />
-                      ) : (
-                        <div
-                          className="px-2.5 py-1.5 flex items-center justify-center rounded-xs"
-                          style={{ backgroundColor: invoiceTheme.primary, color: invoiceTheme.textColor }}
-                        >
-                          <span className="text-base font-serif font-black tracking-wider">
-                            {companySettings.name ? companySettings.name.slice(0, 3).toUpperCase() : 'POS'}
-                          </span>
-                        </div>
-                      )}
-                      <div>
-                        <h1 className="text-xl font-bold uppercase tracking-wider text-black font-serif">
-                          {companySettings.name || 'DokanPro ERP'}
-                        </h1>
-                        {companySettings.nameBn && (
-                          <p className="text-xs text-zinc-700 font-bold">{companySettings.nameBn}</p>
-                        )}
-                        {companySettings.address && (
-                          <p className="text-xs text-zinc-700">{companySettings.address}</p>
-                        )}
-                        {companySettings.phone && (
-                          <p className="text-xs text-zinc-700">Phone: {companySettings.phone} {companySettings.email ? `• ${companySettings.email}` : ''}</p>
-                        )}
-                      </div>
-                    </div>
-
-                    <div className="text-right">
-                      <div className="text-xs text-zinc-800 font-semibold">
-                        Period: {data.period || 'All Time'}
-                      </div>
-                      <div className="text-xs text-zinc-700 mt-1">
-                        Date: {data.generatedDate || printToday}
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Centered Report Title Banner with Invoice Theme */}
-                  <div className="text-center my-4">
-                    <div
-                      className="inline-block px-8 py-2 text-base md:text-lg font-black tracking-widest uppercase font-serif rounded-xs shadow-xs"
-                      style={{ backgroundColor: invoiceTheme.primary, color: invoiceTheme.textColor }}
-                    >
-                      {data.reportTitle || title || 'REPORT STATEMENT'}
-                    </div>
-                  </div>
-
                   {/* Tabular Report Data */}
                   {data.columns && data.columns.length > 0 ? (
                     <table className="w-full text-left border-collapse text-xs mb-6">
-                      <thead>
+                      <thead className="print:table-header-group">
+                        {/* Page-Repeating Company Information & Report Title */}
+                        <tr className="bg-white text-black border-b-2 border-zinc-900" style={{ pageBreakInside: 'avoid', breakInside: 'avoid' }}>
+                          <th colSpan={(data.columns?.length || 1) + 1} className="p-0 font-normal text-left pb-2">
+                            <div className="flex justify-between items-start border-b border-zinc-200 pb-2 mb-2">
+                              <div className="flex items-start gap-3">
+                                {companySettings.logoUrl ? (
+                                  <img
+                                    src={companySettings.logoUrl}
+                                    alt={companySettings.name || 'Store Logo'}
+                                    className="h-11 w-auto object-contain shrink-0"
+                                    onError={(e) => { (e.currentTarget as HTMLElement).style.display = 'none'; }}
+                                  />
+                                ) : (
+                                  <div
+                                    className="px-2.5 py-1.5 flex items-center justify-center rounded-xs"
+                                    style={{ backgroundColor: invoiceTheme.primary, color: invoiceTheme.textColor }}
+                                  >
+                                    <span className="text-base font-serif font-black tracking-wider">
+                                      {companySettings.name ? companySettings.name.slice(0, 3).toUpperCase() : 'POS'}
+                                    </span>
+                                  </div>
+                                )}
+                                <div>
+                                  <h1 className="text-xl font-bold uppercase tracking-wider text-black font-serif">
+                                    {companySettings.name || 'DokanPro ERP'}
+                                  </h1>
+                                  {companySettings.nameBn && (
+                                    <p className="text-xs text-zinc-700 font-bold">{companySettings.nameBn}</p>
+                                  )}
+                                  {companySettings.address && (
+                                    <p className="text-xs text-zinc-700">{companySettings.address}</p>
+                                  )}
+                                  {companySettings.phone && (
+                                    <p className="text-xs text-zinc-700">Phone: {companySettings.phone} {companySettings.email ? `• ${companySettings.email}` : ''}</p>
+                                  )}
+                                </div>
+                              </div>
+
+                              <div className="text-right">
+                                <div className="text-xs text-zinc-800 font-semibold">
+                                  Period: {data.period || 'All Time'}
+                                </div>
+                                <div className="text-xs text-zinc-700 mt-1">
+                                  Date: {data.generatedDate || printToday}
+                                </div>
+                              </div>
+                            </div>
+
+                            {/* Centered Report Title Banner */}
+                            <div className="text-center my-3">
+                              <div
+                                className="inline-block px-8 py-2 text-base md:text-lg font-black tracking-widest uppercase font-serif rounded-xs shadow-xs"
+                                style={{ backgroundColor: invoiceTheme.primary, color: invoiceTheme.textColor }}
+                              >
+                                {data.reportTitle || title || 'REPORT STATEMENT'}
+                              </div>
+                            </div>
+                          </th>
+                        </tr>
+
                         <tr
                           className="font-semibold"
                           style={{ backgroundColor: invoiceTheme.primary, color: invoiceTheme.textColor }}

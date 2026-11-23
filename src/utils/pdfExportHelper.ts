@@ -251,7 +251,7 @@ function appendCanvasPagesToPdf(
   const canRepeatThead =
     Boolean(measuredTable) &&
     theadHeightCanvas > 4 &&
-    theadHeightCanvas < maxPageCanvasPx * 0.25;
+    theadHeightCanvas < maxPageCanvasPx * 0.40;
 
   const theadImgData = canRepeatThead
     ? cropSliceToDataUrl(theadTopCanvas, theadHeightCanvas)
@@ -330,10 +330,30 @@ function appendCanvasPagesToPdf(
   }
 }
 
+function stampPdfPageNumbers(pdf: jsPDF, isThermal: boolean, companyName: string = '') {
+  if (isThermal) return;
+  const totalPages = typeof pdf.getNumberOfPages === 'function' ? pdf.getNumberOfPages() : (pdf.internal.pages.length - 1);
+  if (totalPages <= 0) return;
+  const marginMm = 8;
+  const pageWidth = pdf.internal.pageSize.getWidth();
+  const pageHeight = pdf.internal.pageSize.getHeight();
+
+  for (let pNum = 1; pNum <= totalPages; pNum++) {
+    pdf.setPage(pNum);
+    pdf.setFontSize(8);
+    pdf.setTextColor(80, 80, 80);
+    const leftText = companyName ? `${companyName} • Generated Report` : 'DokanPro ERP • Generated Report';
+    pdf.text(leftText, marginMm, pageHeight - 3);
+    const pageSerial = `Page ${pNum} of ${totalPages}`;
+    pdf.text(pageSerial, pageWidth - marginMm, pageHeight - 3, { align: 'right' });
+  }
+}
+
 export async function exportElementToPdf(
   element: HTMLElement | null,
   fileName: string = 'document.pdf',
-  isLandscape: boolean = false
+  isLandscape: boolean = false,
+  companyName: string = ''
 ): Promise<boolean> {
   if (!element) {
     window.print();
@@ -441,6 +461,7 @@ export async function exportElementToPdf(
         appendCanvasPagesToPdf(pdf, canvas, measuredTable, chunkScale, chunkIdx === 0, marginMm);
       }
 
+      stampPdfPageNumbers(pdf, isThermal, companyName);
       pdf.save(fileName);
       return true;
     }
@@ -467,6 +488,7 @@ export async function exportElementToPdf(
     });
 
     appendCanvasPagesToPdf(pdf, canvas, measuredTable, safeScale, true, marginMm);
+    stampPdfPageNumbers(pdf, isThermal, companyName);
     pdf.save(fileName);
     return true;
   } catch (error) {

@@ -77,7 +77,20 @@ export function printElement(
       : `
         @page {
           size: ${isLandscape ? 'A4 landscape' : 'A4 portrait'};
-          margin: 8mm 8mm;
+          margin: 10mm 10mm 14mm 10mm;
+          @bottom-right {
+            content: "Page " counter(page) " of " counter(pages);
+            font-size: 8pt;
+            font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
+            color: #18181b;
+            font-weight: 600;
+          }
+          @bottom-left {
+            content: "${documentTitle}";
+            font-size: 8pt;
+            font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
+            color: #52525b;
+          }
         }
       `;
 
