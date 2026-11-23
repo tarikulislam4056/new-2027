@@ -1,0 +1,53 @@
+name: Auto-Sync to Existing Pharmecy Repository
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  sync-to-existing-repo:
+    name: Mirror Changes to tarikulislam4056/Pharmecy
+    runs-on: ubuntu-latest
+    if: github.repository != 'tarikulislam4056/Pharmecy'
+
+    steps:
+      - name: Checkout Source Repository
+        uses: actions/checkout@v4
+
+      - name: Push Changes to tarikulislam4056/Pharmecy (main)
+        env:
+          TARGET_REPO_TOKEN: ${{ secrets.TARGET_REPO_TOKEN }}
+        run: |
+          if [ -z "$TARGET_REPO_TOKEN" ]; then
+            echo "TARGET_REPO_TOKEN secret is not set. Add it in Settings -> Secrets and variables -> Actions to enable auto-sync to tarikulislam4056/Pharmecy."
+            exit 0
+          fi
+
+          git clone --branch main --single-branch "https://x-access-token:${TARGET_REPO_TOKEN}@github.com/tarikulislam4056/Pharmecy.git" /tmp/target_repo
+
+          rsync -av --delete \
+            --exclude='.git/' \
+            --exclude='.aistudio/' \
+            --exclude='node_modules/' \
+            --exclude='dist/' \
+            --exclude='.github/workflows/sync-to-pharmecy.yml' \
+            --exclude='erp_storage/' \
+            --exclude='public/erp_storage/' \
+            --exclude='dokanpro_erp_data/' \
+            --exclude='db_config.php' \
+            ./ /tmp/target_repo/
+
+          cd /tmp/target_repo
+          git config user.name "tarikulislam4056"
+          git config user.email "126870992+tarikulislam4056@users.noreply.github.com"
+
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes to sync to tarikulislam4056/Pharmecy."
+            exit 0
+          fi
+
+          git commit -m "Auto-sync updates from AI Studio (${GITHUB_SHA::7})"
+          git push origin main
+          echo "Successfully synced changes to tarikulislam4056/Pharmecy (main)."

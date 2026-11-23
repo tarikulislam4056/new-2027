@@ -1,0 +1,10 @@
+{
+  "name": "Remix Remix Remix DokanPro ERP - Shop \u0026 Inventory Management",
+  "description": "Modern Shop Management \u0026 ERP Web Application tailored for retail and wholesale businesses with multi-lingual (English/Bengali), POS, Installments, Daybook, Payroll, and Accounting.",
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

@@ -1,0 +1,2288 @@
+/**
+ * DokanPro ERP - Comprehensive SQL Database Generator, Importer & Hosting Utility
+ * Author: Md. Tarikul Islam (Phone: 01312305225, Sherpur, Sadar, Sherpur)
+ * Generates 100% production-ready, fault-tolerant MySQL / MariaDB / SQLite / phpMyAdmin compatible SQL dumps
+ * with complete DDL schema, proper UTF8MB4 encoding for Bengali/Unicode, and full live dataset INSERT statements.
+ */
+
+import {
+  Product,
+  Category,
+  Party,
+  SaleInvoice,
+  SaleReturn,
+  PurchaseInvoice,
+  PurchaseReturn,
+  InstallmentScheme,
+  Wallet,
+  ExpenseCategory,
+  ExpenseVoucher,
+  Employee,
+  AdvanceSalary,
+  PayrollEntry,
+  UserAccount,
+  CompanySettings,
+  DayBookEntry,
+  CashAdjustment,
+  SmsLog,
+  SmsConfig,
+  ExpiredReturnLog,
+  Quotation,
+  PurchaseOrder,
+  DeletedSaleInvoice,
+  SalesOrder,
+  ActivityLog,
+  WarrantyPolicy,
+  WarrantyRecord,
+  WarrantyClaim,
+} from '../types/index';
+
+export interface FullAppStateForSql {
+  companySettings: CompanySettings;
+  users: UserAccount[];
+  categories: Category[];
+  products: Product[];
+  parties: Party[];
+  saleInvoices: SaleInvoice[];
+  deletedSaleInvoices?: DeletedSaleInvoice[];
+  saleReturns?: SaleReturn[];
+  quotations?: Quotation[];
+  purchaseInvoices: PurchaseInvoice[];
+  deletedPurchaseInvoices?: any[];
+  purchaseReturns?: PurchaseReturn[];
+  purchaseOrders?: PurchaseOrder[];
+  salesOrders?: SalesOrder[];
+  installmentSchemes: InstallmentScheme[];
+  wallets: Wallet[];
+  expenseCategories: ExpenseCategory[];
+  expenseVouchers: ExpenseVoucher[];
+  employees: Employee[];
+  advanceSalaries: AdvanceSalary[];
+  payrollHistory: PayrollEntry[];
+  dayBookEntries: DayBookEntry[];
+  cashAdjustments: CashAdjustment[];
+  activityLogs?: ActivityLog[];
+  smsLogs?: SmsLog[];
+  smsConfig?: SmsConfig;
+  expiredReturnLogs?: ExpiredReturnLog[];
+  warrantyPolicies?: WarrantyPolicy[];
+  warrantyRecords?: WarrantyRecord[];
+  warrantyClaims?: WarrantyClaim[];
+  diseaseMaster?: any[];
+  diseaseCategories?: any[];
+}
+
+export interface AdminDeletedRecord {
+  archiveId: string;
+  entityType: string;
+  sourceTable: string;
+  recordId: string;
+  referenceNo?: string;
+  title: string;
+  amount?: number;
+  deletedAt: string;
+  deletedAtIso: string;
+  deletedById: string;
+  deletedByUsername: string;
+  deletedByName: string;
+  deletedByRole: 'ADMIN';
+  deletionReason?: string;
+  shopName?: string;
+  recordSnapshot: any;
+}
+
+/**
+ * Escapes SQL strings safely for MySQL / MariaDB / SQLite / phpMyAdmin
+ * Preserves Bengali text and Unicode, handles JSON strings and special characters seamlessly.
+ */
+function sqlEscape(val: any): string {
+  if (val === null || val === undefined) return 'NULL';
+  if (typeof val === 'number') {
+    if (isNaN(val) || !isFinite(val)) return '0';
+    return val.toString();
+  }
+  if (typeof val === 'boolean') return val ? '1' : '0';
+  if (typeof val === 'object') {
+    try {
+      val = JSON.stringify(val);
+    } catch {
+      val = '[]';
+    }
+  }
+  const str = String(val);
+  return "'" + str
+    .replace(/\\/g, '\\\\')
+    .replace(/'/g, "\\'")
+    .replace(/\0/g, '\\0')
+    .replace(/\n/g, '\\n')
+    .replace(/\r/g, '\\r')
+    .replace(/\t/g, '\\t')
+    .replace(/\x1a/g, '\\Z') + "'";
+}
+
+/**
+ * Helper to build chunked INSERT statements to prevent MySQL packet size limits
+ */
+function buildChunkedInserts(
+  tableName: string,
+  columns: string[],
+  rows: string[][],
+  chunkSize = 100
+): string {
+  if (!rows || rows.length === 0) return '';
+
+  let output = `-- Dumping data for table \`${tableName}\` (${rows.length} records)\n`;
+  const colsHeader = `INSERT INTO \`${tableName}\` (\`${columns.join('`, `')}\`) VALUES\n`;
+
+  for (let i = 0; i < rows.length; i += chunkSize) {
+    const chunk = rows.slice(i, i + chunkSize);
+    output += colsHeader;
+    output += chunk.map(row => `  (${row.join(', ')})`).join(',\n') + ';\n\n';
+  }
+
+  return output;
+}
+
+/**
+ * Generates the complete, production-ready SQL database dump file (.sql)
+ */
+export function generateFullSqlDump(state: FullAppStateForSql): string {
+  const timestamp = new Date().toISOString();
+  const dateStr = new Date().toLocaleDateString('en-GB');
+
+  let sql = `-- =========================================================================
+-- DokanPro Enterprise ERP - Production-Grade MySQL/MariaDB Database Dump
+-- Generated At : ${timestamp} (${dateStr})
+-- Developer    : Md. Tarikul Islam
+-- Phone        : 01312305225
+-- Address      : Sherpur, Sadar, Sherpur
+-- Engine       : InnoDB | Charset: UTF8MB4 (Full Bengali & Unicode Support)
+-- Compatibility: MySQL 5.7+, MySQL 8.0+, MariaDB 10.3+, SQLite 3, phpMyAdmin, cPanel, XAMPP
+-- =========================================================================
+
+SET FOREIGN_KEY_CHECKS = 0;
+SET SQL_MODE = "NO_AUTO_VALUE_ON_ZERO";
+SET AUTOCOMMIT = 0;
+START TRANSACTION;
+SET time_zone = "+06:00";
+
+/*!40101 SET @OLD_CHARACTER_SET_CLIENT=@@CHARACTER_SET_CLIENT */;
+/*!40101 SET @OLD_CHARACTER_SET_RESULTS=@@CHARACTER_SET_RESULTS */;
+/*!40101 SET @OLD_COLLATION_CONNECTION=@@COLLATION_CONNECTION */;
+/*!40101 SET NAMES utf8mb4 */;
+
+-- --------------------------------------------------------
+-- Table structure for \`company_settings\`
+-- --------------------------------------------------------
+DROP TABLE IF EXISTS \`company_settings\`;
+CREATE TABLE \`company_settings\` (
+  \`id\` varchar(50) NOT NULL PRIMARY KEY,
+  \`name\` varchar(255) NOT NULL,
+  \`nameBn\` varchar(255) DEFAULT NULL,
+  \`slogan\` varchar(255) DEFAULT NULL,
+  \`phone\` varchar(50) DEFAULT NULL,
+  \`email\` varchar(100) DEFAULT NULL,
+  \`website\` varchar(150) DEFAULT NULL,
+  \`address\` text DEFAULT NULL,
+  \`taxNumber\` varchar(100) DEFAULT NULL,
+  \`currencySymbol\` varchar(20) DEFAULT '৳',
+  \`currencyCode\` varchar(20) DEFAULT 'BDT',
+  \`logoUrl\` longtext DEFAULT NULL,
+  \`signatureUrl\` longtext DEFAULT NULL,
+  \`invoiceFooter\` text DEFAULT NULL,
+  \`defaultVatPercent\` decimal(5,2) DEFAULT 0.00,
+  \`invoicePrintType\` varchar(50) DEFAULT 'A4',
+  \`invoiceTemplate\` varchar(50) DEFAULT 'MODERN_MINIMAL',
+  \`invoiceColorTheme\` varchar(50) DEFAULT 'INDIGO_VIOLET',
+  \`invoiceCustomPrimaryColor\` varchar(20) DEFAULT '#4F46E5',
+  \`invoiceCustomAccentColor\` varchar(20) DEFAULT '#06B6D4',
+  \`dashboardColorTheme\` varchar(50) DEFAULT 'INDIGO',
+  \`sidebarColorTheme\` varchar(50) DEFAULT 'INDIGO',
+  \`sidebarCustomColor\` varchar(20) DEFAULT '#4F46E5',
+  \`smsSenderId\` varchar(100) DEFAULT NULL,
+  \`apiEndpoint\` text DEFAULT NULL,
+  \`autoSyncEnabled\` tinyint(1) DEFAULT 1,
+  \`autoSyncIntervalSeconds\` int(11) DEFAULT 5,
+  \`productGenerics_json\` longtext DEFAULT NULL,
+  \`productManufacturers_json\` longtext DEFAULT NULL,
+  \`productUnits_json\` longtext DEFAULT NULL,
+  \`updated_at\` timestamp DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- --------------------------------------------------------
+-- Table structure for \`users\`
+-- --------------------------------------------------------
+DROP TABLE IF EXISTS \`users\`;
+CREATE TABLE \`users\` (
+  \`id\` varchar(50) NOT NULL PRIMARY KEY,
+  \`username\` varchar(100) NOT NULL UNIQUE,
+  \`password\` varchar(255) NOT NULL,
+  \`fullName\` varchar(150) NOT NULL,
+  \`role\` varchar(50) NOT NULL DEFAULT 'CASHIER',
+  \`email\` varchar(100) DEFAULT NULL,
+  \`phone\` varchar(50) DEFAULT NULL,
+  \`isActive\` tinyint(1) NOT NULL DEFAULT 1,
+  \`permissions_json\` longtext DEFAULT NULL,
+  \`subPermissions_json\` longtext DEFAULT NULL,
+  \`avatar\` longtext DEFAULT NULL,
+  \`lastLogin\` varchar(50) DEFAULT NULL,
+  \`lowStockEmailAlerts\` tinyint(1) DEFAULT 0,
+  \`lowStockSmsAlerts\` tinyint(1) DEFAULT 0,
+  \`created_at\` timestamp DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- --------------------------------------------------------
+-- Table structure for \`categories\`
+-- --------------------------------------------------------
+DROP TABLE IF EXISTS \`categories\`;
+CREATE TABLE \`categories\` (
+  \`id\` varchar(50) NOT NULL PRIMARY KEY,
+  \`name\` varchar(150) NOT NULL,
+  \`nameBn\` varchar(150) DEFAULT NULL,
+  \`code\` varchar(50) DEFAULT NULL,
+  \`description\` text DEFAULT NULL,
+  \`icon\` varchar(50) DEFAULT 'folder',
+  \`createdBy\` varchar(100) DEFAULT NULL,
+  \`created_at\` timestamp DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- --------------------------------------------------------
+-- Table structure for \`products\`
+-- --------------------------------------------------------
+DROP TABLE IF EXISTS \`products\`;
+CREATE TABLE \`products\` (
+  \`id\` varchar(50) NOT NULL PRIMARY KEY,
+  \`sku\` varchar(100) NOT NULL UNIQUE,
+  \`barcode\` varchar(100) DEFAULT NULL,
+  \`name\` varchar(255) NOT NULL,
+  \`nameBn\` varchar(255) DEFAULT NULL,
+  \`medicine\` varchar(255) DEFAULT NULL,
+  \`medicine_name\` varchar(255) DEFAULT NULL,
+  \`categoryId\` varchar(50) DEFAULT NULL,
+  \`categoryName\` varchar(255) DEFAULT NULL,
+  \`purchasePrice\` decimal(12,2) NOT NULL DEFAULT 0.00,
+  \`salesPrice\` decimal(12,2) NOT NULL DEFAULT 0.00,
+  \`discount\` decimal(12,2) NOT NULL DEFAULT 0.00,
+  \`discountType\` varchar(50) DEFAULT 'flat',
+  \`expDate\` varchar(50) DEFAULT NULL,
+  \`generic\` varchar(255) DEFAULT NULL,
+  \`manufacturer\` varchar(255) DEFAULT NULL,
+  \`dosageForm\` varchar(100) DEFAULT NULL,
+  \`strength\` varchar(100) DEFAULT NULL,
+  \`rackLocation\` varchar(100) DEFAULT NULL,
+  \`stripSize\` int(11) DEFAULT NULL,
+  \`diseases_json\` longtext DEFAULT NULL,
+  \`dosageSchedule\` varchar(255) DEFAULT NULL,
+  \`mealTiming\` varchar(255) DEFAULT NULL,
+  \`duration\` varchar(100) DEFAULT NULL,
+  \`instructions\` text DEFAULT NULL,
+  \`precautions\` text DEFAULT NULL,
+  \`reorderLevel\` decimal(12,2) NOT NULL DEFAULT 5.00,
+  \`stock\` decimal(12,2) NOT NULL DEFAULT 0.00,
+  \`unit\` varchar(50) DEFAULT 'Pcs',
+  \`batchNumber\` varchar(100) DEFAULT NULL,
+  \`batches_json\` longtext DEFAULT NULL,
+  \`image\` longtext DEFAULT NULL,
+  \`imageUrl\` longtext DEFAULT NULL,
+  \`description\` text DEFAULT NULL,
+  \`hasWarranty\` tinyint(1) DEFAULT 0,
+  \`warrantyDuration\` int(11) DEFAULT NULL,
+  \`warrantyUnit\` varchar(50) DEFAULT NULL,
+  \`warrantyType\` varchar(50) DEFAULT NULL,
+  \`warrantyTerms\` text DEFAULT NULL,
+  \`requiresSerialNo\` tinyint(1) DEFAULT 0,
+  \`createdBy\` varchar(100) DEFAULT NULL,
+  \`created_at\` varchar(100) DEFAULT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- --------------------------------------------------------
+-- Table structure for \`medicines\`
+-- --------------------------------------------------------
+DROP TABLE IF EXISTS \`medicines\`;
+CREATE TABLE \`medicines\` (
+  \`id\` varchar(50) NOT NULL PRIMARY KEY,
+  \`medicine\` varchar(255) NOT NULL,
+  \`medicine_name\` varchar(255) NOT NULL,
+  \`sku\` varchar(100) NOT NULL,
+  \`barcode\` varchar(100) DEFAULT NULL,
+  \`generic\` varchar(255) DEFAULT NULL,
+  \`brand\` varchar(255) DEFAULT NULL,
+  \`manufacturer\` varchar(255) DEFAULT NULL,
+  \`strength\` varchar(100) DEFAULT NULL,
+  \`dosage_form\` varchar(100) DEFAULT NULL,
+  \`category\` varchar(255) DEFAULT NULL,
+  \`purchase_price\` decimal(12,2) NOT NULL DEFAULT 0.00,
+  \`sales_price\` decimal(12,2) NOT NULL DEFAULT 0.00,
+  \`stock\` decimal(12,2) NOT NULL DEFAULT 0.00,
+  \`unit\` varchar(50) DEFAULT 'Pcs',
+  \`exp_date\` varchar(50) DEFAULT NULL,
+  \`batch_no\` varchar(100) DEFAULT NULL,
+  \`rack_location\` varchar(100) DEFAULT NULL,
+  \`created_at\` varchar(100) DEFAULT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- --------------------------------------------------------
+-- Table structure for \`disease_categories\`
+-- --------------------------------------------------------
+DROP TABLE IF EXISTS \`disease_categories\`;
+CREATE TABLE \`disease_categories\` (
+  \`id\` varchar(50) NOT NULL PRIMARY KEY,
+  \`name\` varchar(150) NOT NULL,
+  \`nameBn\` varchar(150) NOT NULL,
+  \`isDefault\` tinyint(1) DEFAULT 0
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- --------------------------------------------------------
+-- Table structure for \`disease_master\`
+-- --------------------------------------------------------
+DROP TABLE IF EXISTS \`disease_master\`;
+CREATE TABLE \`disease_master\` (
+  \`id\` varchar(50) NOT NULL PRIMARY KEY,
+  \`diseaseName\` varchar(255) NOT NULL,
+  \`diseaseNameBn\` varchar(255) NOT NULL,
+  \`category\` varchar(100) NOT NULL,
+  \`categoryBn\` varchar(100) DEFAULT NULL,
+  \`symptoms_json\` longtext DEFAULT NULL,
+  \`description\` text DEFAULT NULL,
+  \`recommendedMedicines_json\` longtext DEFAULT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- --------------------------------------------------------
+-- Table structure for \`parties\` (Customers & Suppliers)
+-- --------------------------------------------------------
+DROP TABLE IF EXISTS \`parties\`;
+CREATE TABLE \`parties\` (
+  \`id\` varchar(50) NOT NULL PRIMARY KEY,
+  \`serialNumber\` varchar(50) DEFAULT NULL,
+  \`type\` enum('CUSTOMER','SUPPLIER') NOT NULL DEFAULT 'CUSTOMER',
+  \`name\` varchar(200) NOT NULL,
+  \`nameBn\` varchar(200) DEFAULT NULL,
+  \`phone\` varchar(50) NOT NULL,
+  \`email\` varchar(100) DEFAULT NULL,
+  \`companyName\` varchar(200) DEFAULT NULL,
+  \`address\` text DEFAULT NULL,
+  \`openingBalance\` decimal(12,2) NOT NULL DEFAULT 0.00,
+  \`currentBalance\` decimal(12,2) NOT NULL DEFAULT 0.00,
+  \`creditLimit\` decimal(12,2) DEFAULT 0.00,
+  \`status\` varchar(50) DEFAULT 'ACTIVE',
+  \`taxNumber\` varchar(100) DEFAULT NULL,
+  \`bankDetails\` text DEFAULT NULL,
+  \`createdBy\` varchar(100) DEFAULT NULL,
+  \`created_at\` varchar(100) DEFAULT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- --------------------------------------------------------
+-- Table structure for \`wallets\` (Payment Accounts)
+-- --------------------------------------------------------
+DROP TABLE IF EXISTS \`wallets\`;
+CREATE TABLE \`wallets\` (
+  \`id\` varchar(50) NOT NULL PRIMARY KEY,
+  \`name\` varchar(100) NOT NULL,
+  \`nameBn\` varchar(100) DEFAULT NULL,
+  \`type\` varchar(50) NOT NULL DEFAULT 'CASH',
+  \`accountNumber\` varchar(100) DEFAULT NULL,
+  \`bankName\` varchar(150) DEFAULT NULL,
+  \`branch\` varchar(150) DEFAULT NULL,
+  \`balance\` decimal(12,2) NOT NULL DEFAULT 0.00,
+  \`isActive\` tinyint(1) DEFAULT 1,
+  \`colorCode\` varchar(50) DEFAULT NULL,
+  \`createdBy\` varchar(100) DEFAULT NULL,
+  \`created_at\` timestamp DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- --------------------------------------------------------
+-- Table structure for \`sales_invoices\`
+-- --------------------------------------------------------
+DROP TABLE IF EXISTS \`sales_invoices\`;
+CREATE TABLE \`sales_invoices\` (
+  \`id\` varchar(50) NOT NULL PRIMARY KEY,
+  \`invoiceNumber\` varchar(100) NOT NULL UNIQUE,
+  \`date\` varchar(50) NOT NULL,
+  \`customerId\` varchar(50) DEFAULT NULL,
+  \`customerName\` varchar(200) DEFAULT NULL,
+  \`customerPhone\` varchar(50) DEFAULT NULL,
+  \`customerAddress\` text DEFAULT NULL,
+  \`subtotal\` decimal(12,2) NOT NULL DEFAULT 0.00,
+  \`discount\` decimal(12,2) NOT NULL DEFAULT 0.00,
+  \`discountType\` varchar(50) DEFAULT 'flat',
+  \`vatAmount\` decimal(12,2) NOT NULL DEFAULT 0.00,
+  \`grandTotal\` decimal(12,2) NOT NULL DEFAULT 0.00,
+  \`paidAmount\` decimal(12,2) NOT NULL DEFAULT 0.00,
+  \`dueAmount\` decimal(12,2) NOT NULL DEFAULT 0.00,
+  \`paymentMethod\` varchar(50) DEFAULT 'CASH',
+  \`walletId\` varchar(50) DEFAULT NULL,
+  \`walletName\` varchar(150) DEFAULT NULL,
+  \`status\` varchar(50) DEFAULT 'PAID',
+  \`notes\` text DEFAULT NULL,
+  \`cashierName\` varchar(150) DEFAULT NULL,
+  \`isInstallmentSale\` tinyint(1) DEFAULT 0,
+  \`installmentPlanId\` varchar(50) DEFAULT NULL,
+  \`items_json\` longtext DEFAULT NULL,
+  \`createdBy\` varchar(100) DEFAULT NULL,
+  \`created_at\` varchar(100) DEFAULT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- --------------------------------------------------------
+-- Table structure for \`sales_returns\`
+-- --------------------------------------------------------
+DROP TABLE IF EXISTS \`sales_returns\`;
+CREATE TABLE \`sales_returns\` (
+  \`id\` varchar(50) NOT NULL PRIMARY KEY,
+  \`returnNumber\` varchar(100) NOT NULL UNIQUE,
+  \`originalInvoiceNumber\` varchar(100) NOT NULL,
+  \`invoiceId\` varchar(50) NOT NULL,
+  \`date\` varchar(50) NOT NULL,
+  \`customerId\` varchar(50) DEFAULT NULL,
+  \`customerName\` varchar(200) DEFAULT NULL,
+  \`totalRefund\` decimal(12,2) NOT NULL DEFAULT 0.00,
+  \`refundWalletId\` varchar(50) DEFAULT NULL,
+  \`refundWalletName\` varchar(150) DEFAULT NULL,
+  \`reason\` text DEFAULT NULL,
+  \`items_json\` longtext DEFAULT NULL,
+  \`createdBy\` varchar(100) DEFAULT NULL,
+  \`created_at\` varchar(100) DEFAULT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- --------------------------------------------------------
+-- Table structure for \`quotations\` (Price Quotes)
+-- --------------------------------------------------------
+DROP TABLE IF EXISTS \`quotations\`;
+CREATE TABLE \`quotations\` (
+  \`id\` varchar(50) NOT NULL PRIMARY KEY,
+  \`quotationNumber\` varchar(100) NOT NULL UNIQUE,
+  \`date\` varchar(50) NOT NULL,
+  \`validUntil\` varchar(50) DEFAULT NULL,
+  \`customerId\` varchar(50) DEFAULT NULL,
+  \`customerName\` varchar(200) DEFAULT NULL,
+  \`customerPhone\` varchar(50) DEFAULT NULL,
+  \`customerAddress\` text DEFAULT NULL,
+  \`subtotal\` decimal(12,2) NOT NULL DEFAULT 0.00,
+  \`discount\` decimal(12,2) NOT NULL DEFAULT 0.00,
+  \`discountType\` varchar(50) DEFAULT 'flat',
+  \`vatAmount\` decimal(12,2) NOT NULL DEFAULT 0.00,
+  \`grandTotal\` decimal(12,2) NOT NULL DEFAULT 0.00,
+  \`status\` varchar(50) DEFAULT 'DRAFT',
+  \`salesPerson\` varchar(150) DEFAULT NULL,
+  \`notes\` text DEFAULT NULL,
+  \`items_json\` longtext DEFAULT NULL,
+  \`createdBy\` varchar(100) DEFAULT NULL,
+  \`created_at\` varchar(100) DEFAULT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- --------------------------------------------------------
+-- Table structure for \`sales_orders\`
+-- --------------------------------------------------------
+DROP TABLE IF EXISTS \`sales_orders\`;
+CREATE TABLE \`sales_orders\` (
+  \`id\` varchar(50) NOT NULL PRIMARY KEY,
+  \`orderNumber\` varchar(100) NOT NULL UNIQUE,
+  \`date\` varchar(50) NOT NULL,
+  \`deliveryDate\` varchar(50) DEFAULT NULL,
+  \`customerId\` varchar(50) NOT NULL,
+  \`customerName\` varchar(200) NOT NULL,
+  \`customerPhone\` varchar(50) NOT NULL,
+  \`customerAddress\` text DEFAULT NULL,
+  \`subtotal\` decimal(12,2) NOT NULL DEFAULT 0.00,
+  \`discount\` decimal(12,2) NOT NULL DEFAULT 0.00,
+  \`discountType\` varchar(50) DEFAULT 'flat',
+  \`taxAmount\` decimal(12,2) NOT NULL DEFAULT 0.00,
+  \`grandTotal\` decimal(12,2) NOT NULL DEFAULT 0.00,
+  \`status\` varchar(50) NOT NULL DEFAULT 'PENDING',
+  \`notes\` text DEFAULT NULL,
+  \`walletId\` varchar(50) DEFAULT NULL,
+  \`paidAmount\` decimal(12,2) DEFAULT 0.00,
+  \`createdBy\` varchar(100) DEFAULT NULL,
+  \`convertedSaleInvoiceId\` varchar(50) DEFAULT NULL,
+  \`items_json\` longtext DEFAULT NULL,
+  \`createdAt\` varchar(100) DEFAULT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- --------------------------------------------------------
+-- Table structure for \`purchase_invoices\`
+-- --------------------------------------------------------
+DROP TABLE IF EXISTS \`purchase_invoices\`;
+CREATE TABLE \`purchase_invoices\` (
+  \`id\` varchar(50) NOT NULL PRIMARY KEY,
+  \`billNumber\` varchar(100) NOT NULL UNIQUE,
+  \`supplierInvoiceNo\` varchar(100) DEFAULT NULL,
+  \`date\` varchar(50) NOT NULL,
+  \`supplierId\` varchar(50) DEFAULT NULL,
+  \`supplierName\` varchar(200) DEFAULT NULL,
+  \`supplierPhone\` varchar(50) DEFAULT NULL,
+  \`subtotal\` decimal(12,2) NOT NULL DEFAULT 0.00,
+  \`discount\` decimal(12,2) NOT NULL DEFAULT 0.00,
+  \`taxAmount\` decimal(12,2) NOT NULL DEFAULT 0.00,
+  \`grandTotal\` decimal(12,2) NOT NULL DEFAULT 0.00,
+  \`paidAmount\` decimal(12,2) NOT NULL DEFAULT 0.00,
+  \`dueAmount\` decimal(12,2) NOT NULL DEFAULT 0.00,
+  \`paymentMethod\` varchar(50) DEFAULT 'CASH',
+  \`walletId\` varchar(50) DEFAULT NULL,
+  \`walletName\` varchar(150) DEFAULT NULL,
+  \`status\` varchar(50) DEFAULT 'PAID',
+  \`notes\` text DEFAULT NULL,
+  \`items_json\` longtext DEFAULT NULL,
+  \`createdBy\` varchar(100) DEFAULT NULL,
+  \`created_at\` varchar(100) DEFAULT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- --------------------------------------------------------
+-- Table structure for \`purchase_returns\`
+-- --------------------------------------------------------
+DROP TABLE IF EXISTS \`purchase_returns\`;
+CREATE TABLE \`purchase_returns\` (
+  \`id\` varchar(50) NOT NULL PRIMARY KEY,
+  \`returnNumber\` varchar(100) NOT NULL UNIQUE,
+  \`originalBillNumber\` varchar(100) NOT NULL,
+  \`purchaseId\` varchar(50) NOT NULL,
+  \`date\` varchar(50) NOT NULL,
+  \`supplierId\` varchar(50) DEFAULT NULL,
+  \`supplierName\` varchar(200) DEFAULT NULL,
+  \`totalAmount\` decimal(12,2) NOT NULL DEFAULT 0.00,
+  \`refundWalletId\` varchar(50) DEFAULT NULL,
+  \`refundWalletName\` varchar(150) DEFAULT NULL,
+  \`reason\` text DEFAULT NULL,
+  \`items_json\` longtext DEFAULT NULL,
+  \`createdBy\` varchar(100) DEFAULT NULL,
+  \`created_at\` varchar(100) DEFAULT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- --------------------------------------------------------
+-- Table structure for \`purchase_orders\` (PO)
+-- --------------------------------------------------------
+DROP TABLE IF EXISTS \`purchase_orders\`;
+CREATE TABLE \`purchase_orders\` (
+  \`id\` varchar(50) NOT NULL PRIMARY KEY,
+  \`poNumber\` varchar(100) NOT NULL UNIQUE,
+  \`supplierId\` varchar(50) DEFAULT NULL,
+  \`supplierName\` varchar(200) DEFAULT NULL,
+  \`supplierPhone\` varchar(50) DEFAULT NULL,
+  \`date\` varchar(50) NOT NULL,
+  \`expectedDeliveryDate\` varchar(50) DEFAULT NULL,
+  \`totalAmount\` decimal(12,2) NOT NULL DEFAULT 0.00,
+  \`status\` varchar(50) DEFAULT 'PENDING',
+  \`notes\` text DEFAULT NULL,
+  \`items_json\` longtext DEFAULT NULL,
+  \`createdBy\` varchar(100) DEFAULT NULL,
+  \`created_at\` varchar(100) DEFAULT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- --------------------------------------------------------
+-- Table structure for \`deleted_sales_invoices\`
+-- --------------------------------------------------------
+DROP TABLE IF EXISTS \`deleted_sales_invoices\`;
+CREATE TABLE \`deleted_sales_invoices\` (
+  \`id\` varchar(50) NOT NULL PRIMARY KEY,
+  \`invoiceNumber\` varchar(100) DEFAULT NULL,
+  \`deletedAt\` varchar(50) DEFAULT NULL,
+  \`deletedBy\` varchar(150) DEFAULT NULL,
+  \`reason\` text DEFAULT NULL,
+  \`originalInvoice_json\` longtext DEFAULT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- --------------------------------------------------------
+-- Table structure for \`installment_schemes\` (EMI/Kisti)
+-- --------------------------------------------------------
+DROP TABLE IF EXISTS \`installment_schemes\`;
+CREATE TABLE \`installment_schemes\` (
+  \`id\` varchar(50) NOT NULL PRIMARY KEY,
+  \`schemeNumber\` varchar(100) NOT NULL UNIQUE,
+  \`customerId\` varchar(50) NOT NULL,
+  \`customerName\` varchar(200) NOT NULL,
+  \`customerPhone\` varchar(50) NOT NULL,
+  \`invoiceId\` varchar(50) DEFAULT NULL,
+  \`invoiceNumber\` varchar(100) DEFAULT NULL,
+  \`productName\` varchar(255) NOT NULL,
+  \`totalPrice\` decimal(12,2) NOT NULL DEFAULT 0.00,
+  \`downPayment\` decimal(12,2) NOT NULL DEFAULT 0.00,
+  \`principalAmount\` decimal(12,2) NOT NULL DEFAULT 0.00,
+  \`interestRate\` decimal(5,2) NOT NULL DEFAULT 0.00,
+  \`interestAmount\` decimal(12,2) NOT NULL DEFAULT 0.00,
+  \`totalPayable\` decimal(12,2) NOT NULL DEFAULT 0.00,
+  \`totalInstallments\` int(11) NOT NULL DEFAULT 6,
+  \`frequency\` varchar(50) DEFAULT 'MONTHLY',
+  \`emiAmount\` decimal(12,2) NOT NULL DEFAULT 0.00,
+  \`startDate\` varchar(50) NOT NULL,
+  \`status\` varchar(50) DEFAULT 'ACTIVE',
+  \`guarantorName\` varchar(150) DEFAULT NULL,
+  \`guarantorPhone\` varchar(50) DEFAULT NULL,
+  \`guarantorNid\` varchar(50) DEFAULT NULL,
+  \`notes\` text DEFAULT NULL,
+  \`schedules_json\` longtext DEFAULT NULL,
+  \`createdBy\` varchar(100) DEFAULT NULL,
+  \`created_at\` varchar(100) DEFAULT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- --------------------------------------------------------
+-- Table structure for \`expense_categories\`
+-- --------------------------------------------------------
+DROP TABLE IF EXISTS \`expense_categories\`;
+CREATE TABLE \`expense_categories\` (
+  \`id\` varchar(50) NOT NULL PRIMARY KEY,
+  \`name\` varchar(150) NOT NULL,
+  \`nameBn\` varchar(150) DEFAULT NULL,
+  \`code\` varchar(50) NOT NULL UNIQUE,
+  \`description\` text DEFAULT NULL,
+  \`budgetMonthly\` decimal(12,2) DEFAULT 0.00,
+  \`createdBy\` varchar(100) DEFAULT NULL,
+  \`created_at\` timestamp DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- --------------------------------------------------------
+-- Table structure for \`expense_vouchers\`
+-- --------------------------------------------------------
+DROP TABLE IF EXISTS \`expense_vouchers\`;
+CREATE TABLE \`expense_vouchers\` (
+  \`id\` varchar(50) NOT NULL PRIMARY KEY,
+  \`voucherNo\` varchar(100) NOT NULL,
+  \`date\` varchar(50) NOT NULL,
+  \`categoryId\` varchar(50) NOT NULL,
+  \`categoryName\` varchar(150) NOT NULL,
+  \`category\` varchar(150) DEFAULT NULL,
+  \`amount\` decimal(12,2) NOT NULL DEFAULT 0.00,
+  \`walletId\` varchar(50) DEFAULT NULL,
+  \`walletName\` varchar(100) DEFAULT NULL,
+  \`payee\` varchar(150) DEFAULT NULL,
+  \`receiptNo\` varchar(100) DEFAULT NULL,
+  \`note\` text DEFAULT NULL,
+  \`remarks\` text DEFAULT NULL,
+  \`createdBy\` varchar(100) DEFAULT NULL,
+  \`created_at\` varchar(100) DEFAULT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- --------------------------------------------------------
+-- Table structure for \`employees\` (HR & Payroll)
+-- --------------------------------------------------------
+DROP TABLE IF EXISTS \`employees\`;
+CREATE TABLE \`employees\` (
+  \`id\` varchar(50) NOT NULL PRIMARY KEY,
+  \`employeeCode\` varchar(50) NOT NULL UNIQUE,
+  \`name\` varchar(150) NOT NULL,
+  \`nameBn\` varchar(150) DEFAULT NULL,
+  \`phone\` varchar(50) NOT NULL,
+  \`email\` varchar(100) DEFAULT NULL,
+  \`designation\` varchar(100) NOT NULL,
+  \`department\` varchar(100) NOT NULL,
+  \`joiningDate\` varchar(50) DEFAULT NULL,
+  \`baseSalary\` decimal(12,2) NOT NULL DEFAULT 0.00,
+  \`houseRentAllowance\` decimal(12,2) NOT NULL DEFAULT 0.00,
+  \`medicalAllowance\` decimal(12,2) NOT NULL DEFAULT 0.00,
+  \`conveyanceAllowance\` decimal(12,2) NOT NULL DEFAULT 0.00,
+  \`status\` varchar(50) DEFAULT 'ACTIVE',
+  \`bankAccount\` varchar(100) DEFAULT NULL,
+  \`nid\` varchar(100) DEFAULT NULL,
+  \`address\` text DEFAULT NULL,
+  \`resignedDate\` varchar(50) DEFAULT NULL,
+  \`resignationReason\` text DEFAULT NULL,
+  \`settlementNotes\` text DEFAULT NULL,
+  \`finalSettlementAmount\` decimal(12,2) DEFAULT 0.00,
+  \`finalSettlementPaid\` tinyint(1) DEFAULT 0,
+  \`settlementWalletId\` varchar(50) DEFAULT NULL,
+  \`settlementWalletName\` varchar(150) DEFAULT NULL,
+  \`createdBy\` varchar(100) DEFAULT NULL,
+  \`created_at\` timestamp DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- --------------------------------------------------------
+-- Table structure for \`advance_salaries\`
+-- --------------------------------------------------------
+DROP TABLE IF EXISTS \`advance_salaries\`;
+CREATE TABLE \`advance_salaries\` (
+  \`id\` varchar(50) NOT NULL PRIMARY KEY,
+  \`voucherNo\` varchar(100) NOT NULL,
+  \`employeeId\` varchar(50) NOT NULL,
+  \`employeeName\` varchar(150) NOT NULL,
+  \`amount\` decimal(12,2) NOT NULL DEFAULT 0.00,
+  \`date\` varchar(50) NOT NULL,
+  \`walletId\` varchar(50) DEFAULT NULL,
+  \`walletName\` varchar(150) DEFAULT NULL,
+  \`reason\` text DEFAULT NULL,
+  \`isDeducted\` tinyint(1) NOT NULL DEFAULT 0,
+  \`deductedInPayrollMonth\` varchar(50) DEFAULT NULL,
+  \`createdBy\` varchar(100) DEFAULT NULL,
+  \`created_at\` varchar(100) DEFAULT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- --------------------------------------------------------
+-- Table structure for \`payroll_history\`
+-- --------------------------------------------------------
+DROP TABLE IF EXISTS \`payroll_history\`;
+CREATE TABLE \`payroll_history\` (
+  \`id\` varchar(50) NOT NULL PRIMARY KEY,
+  \`payrollMonth\` varchar(50) NOT NULL,
+  \`employeeId\` varchar(50) NOT NULL,
+  \`employeeName\` varchar(150) NOT NULL,
+  \`employeeCode\` varchar(50) NOT NULL,
+  \`designation\` varchar(100) NOT NULL,
+  \`baseSalary\` decimal(12,2) NOT NULL DEFAULT 0.00,
+  \`allowances\` decimal(12,2) NOT NULL DEFAULT 0.00,
+  \`bonus\` decimal(12,2) NOT NULL DEFAULT 0.00,
+  \`advanceDeduction\` decimal(12,2) NOT NULL DEFAULT 0.00,
+  \`fineDeduction\` decimal(12,2) NOT NULL DEFAULT 0.00,
+  \`grossPay\` decimal(12,2) NOT NULL DEFAULT 0.00,
+  \`payableAmount\` decimal(12,2) NOT NULL DEFAULT 0.00,
+  \`paidAmount\` decimal(12,2) NOT NULL DEFAULT 0.00,
+  \`dueAmount\` decimal(12,2) NOT NULL DEFAULT 0.00,
+  \`totalPaidSoFar\` decimal(12,2) NOT NULL DEFAULT 0.00,
+  \`paymentType\` varchar(50) DEFAULT NULL,
+  \`installmentNo\` int(11) DEFAULT 1,
+  \`notes\` text DEFAULT NULL,
+  \`netPay\` decimal(12,2) NOT NULL DEFAULT 0.00,
+  \`paymentDate\` varchar(50) NOT NULL,
+  \`walletId\` varchar(50) DEFAULT NULL,
+  \`walletName\` varchar(150) DEFAULT NULL,
+  \`status\` varchar(50) DEFAULT 'PAID',
+  \`voucherNo\` varchar(100) NOT NULL,
+  \`createdBy\` varchar(100) DEFAULT NULL,
+  \`created_at\` varchar(100) DEFAULT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- --------------------------------------------------------
+-- Table structure for \`daybook_entries\`
+-- --------------------------------------------------------
+DROP TABLE IF EXISTS \`daybook_entries\`;
+CREATE TABLE \`daybook_entries\` (
+  \`id\` varchar(50) NOT NULL PRIMARY KEY,
+  \`voucherNo\` varchar(100) NOT NULL,
+  \`date\` varchar(50) NOT NULL,
+  \`type\` varchar(50) NOT NULL,
+  \`flow\` varchar(10) NOT NULL,
+  \`partyId\` varchar(50) DEFAULT NULL,
+  \`partyName\` varchar(200) DEFAULT NULL,
+  \`partyType\` varchar(50) DEFAULT NULL,
+  \`amount\` decimal(12,2) NOT NULL DEFAULT 0.00,
+  \`walletId\` varchar(50) DEFAULT NULL,
+  \`walletName\` varchar(150) DEFAULT NULL,
+  \`referenceId\` varchar(50) DEFAULT NULL,
+  \`referenceNo\` varchar(100) DEFAULT NULL,
+  \`remarks\` text DEFAULT NULL,
+  \`createdBy\` varchar(100) DEFAULT NULL,
+  \`created_at\` varchar(100) DEFAULT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- --------------------------------------------------------
+-- Table structure for \`cash_adjustments\`
+-- --------------------------------------------------------
+DROP TABLE IF EXISTS \`cash_adjustments\`;
+CREATE TABLE \`cash_adjustments\` (
+  \`id\` varchar(50) NOT NULL PRIMARY KEY,
+  \`voucherNo\` varchar(100) NOT NULL,
+  \`date\` varchar(50) NOT NULL,
+  \`type\` varchar(50) NOT NULL,
+  \`amount\` decimal(12,2) NOT NULL DEFAULT 0.00,
+  \`walletId\` varchar(50) NOT NULL,
+  \`walletName\` varchar(150) DEFAULT NULL,
+  \`reason\` text DEFAULT NULL,
+  \`authorizedBy\` varchar(100) DEFAULT NULL,
+  \`createdBy\` varchar(100) DEFAULT NULL,
+  \`created_at\` varchar(100) DEFAULT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- --------------------------------------------------------
+-- Table structure for \`expired_return_logs\`
+-- --------------------------------------------------------
+DROP TABLE IF EXISTS \`expired_return_logs\`;
+CREATE TABLE \`expired_return_logs\` (
+  \`id\` varchar(50) NOT NULL PRIMARY KEY,
+  \`date\` varchar(50) NOT NULL,
+  \`productId\` varchar(50) NOT NULL,
+  \`productName\` varchar(255) NOT NULL,
+  \`sku\` varchar(100) NOT NULL,
+  \`unit\` varchar(50) DEFAULT 'Pcs',
+  \`quantity\` decimal(12,2) NOT NULL DEFAULT 0.00,
+  \`purchasePrice\` decimal(12,2) NOT NULL DEFAULT 0.00,
+  \`totalValue\` decimal(12,2) NOT NULL DEFAULT 0.00,
+  \`actionType\` varchar(50) NOT NULL,
+  \`notes\` text DEFAULT NULL,
+  \`batchNumber\` varchar(100) DEFAULT NULL,
+  \`purchaseInvoiceNo\` varchar(100) DEFAULT NULL,
+  \`expDate\` varchar(50) DEFAULT NULL,
+  \`createdBy\` varchar(100) DEFAULT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- --------------------------------------------------------
+-- Table structure for \`activity_logs\`
+-- --------------------------------------------------------
+DROP TABLE IF EXISTS \`activity_logs\`;
+CREATE TABLE \`activity_logs\` (
+  \`id\` varchar(50) NOT NULL PRIMARY KEY,
+  \`timestamp\` varchar(50) NOT NULL,
+  \`userId\` varchar(50) DEFAULT NULL,
+  \`userName\` varchar(150) DEFAULT NULL,
+  \`role\` varchar(50) DEFAULT NULL,
+  \`action\` varchar(100) NOT NULL,
+  \`module\` varchar(100) NOT NULL,
+  \`details\` text DEFAULT NULL,
+  \`ipAddress\` varchar(50) DEFAULT NULL,
+  \`metadata_json\` longtext DEFAULT NULL,
+  \`created_at\` timestamp DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- --------------------------------------------------------
+-- Table structure for \`sms_config\`
+-- --------------------------------------------------------
+DROP TABLE IF EXISTS \`sms_config\`;
+CREATE TABLE \`sms_config\` (
+  \`id\` varchar(50) NOT NULL PRIMARY KEY,
+  \`enabled\` tinyint(1) NOT NULL DEFAULT 0,
+  \`provider\` varchar(100) NOT NULL,
+  \`apiUrl\` text DEFAULT NULL,
+  \`apiKey\` text DEFAULT NULL,
+  \`senderId\` varchar(100) DEFAULT NULL,
+  \`username\` varchar(150) DEFAULT NULL,
+  \`password\` varchar(150) DEFAULT NULL,
+  \`clientId\` varchar(150) DEFAULT NULL,
+  \`httpMethod\` varchar(20) DEFAULT 'GET',
+  \`requestFormat\` varchar(50) DEFAULT 'json',
+  \`customProviders_json\` longtext DEFAULT NULL,
+  \`customToParam\` varchar(100) DEFAULT NULL,
+  \`customMsgParam\` varchar(100) DEFAULT NULL,
+  \`customKeyParam\` varchar(100) DEFAULT NULL,
+  \`customSenderParam\` varchar(100) DEFAULT NULL,
+  \`customUserParam\` varchar(100) DEFAULT NULL,
+  \`customPassParam\` varchar(100) DEFAULT NULL,
+  \`customHeaders\` text DEFAULT NULL,
+  \`autoSendOnSale\` tinyint(1) DEFAULT 1,
+  \`autoSendOnPaymentIn\` tinyint(1) DEFAULT 1,
+  \`autoSendOnInstallmentReminder\` tinyint(1) DEFAULT 1,
+  \`autoSendOnWarrantyResolved\` tinyint(1) DEFAULT 1,
+  \`saleTemplate\` text DEFAULT NULL,
+  \`paymentInTemplate\` text DEFAULT NULL,
+  \`dueReminderTemplate\` text DEFAULT NULL,
+  \`warrantyResolvedTemplate\` text DEFAULT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- --------------------------------------------------------
+-- Table structure for \`sms_logs\`
+-- --------------------------------------------------------
+DROP TABLE IF EXISTS \`sms_logs\`;
+CREATE TABLE \`sms_logs\` (
+  \`id\` varchar(50) NOT NULL PRIMARY KEY,
+  \`recipientPhone\` varchar(50) NOT NULL,
+  \`recipientName\` varchar(150) DEFAULT NULL,
+  \`message\` text NOT NULL,
+  \`type\` varchar(50) NOT NULL,
+  \`status\` varchar(50) NOT NULL,
+  \`responseDetails\` text DEFAULT NULL,
+  \`date\` varchar(50) NOT NULL,
+  \`time\` varchar(50) DEFAULT NULL,
+  \`created_at\` timestamp DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- --------------------------------------------------------
+-- Table structure for \`warranty_policies\`
+-- --------------------------------------------------------
+DROP TABLE IF EXISTS \`warranty_policies\`;
+CREATE TABLE \`warranty_policies\` (
+  \`id\` varchar(50) NOT NULL PRIMARY KEY,
+  \`name\` varchar(150) NOT NULL,
+  \`nameBn\` varchar(150) DEFAULT NULL,
+  \`duration\` int(11) NOT NULL DEFAULT 1,
+  \`durationUnit\` varchar(50) NOT NULL DEFAULT 'MONTHS',
+  \`terms\` text DEFAULT NULL,
+  \`type\` varchar(50) NOT NULL DEFAULT 'REPAIR',
+  \`isDefault\` tinyint(1) DEFAULT 0,
+  \`created_at\` timestamp DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- --------------------------------------------------------
+-- Table structure for \`warranty_records\`
+-- --------------------------------------------------------
+DROP TABLE IF EXISTS \`warranty_records\`;
+CREATE TABLE \`warranty_records\` (
+  \`id\` varchar(50) NOT NULL PRIMARY KEY,
+  \`warrantyCode\` varchar(100) NOT NULL UNIQUE,
+  \`invoiceId\` varchar(50) NOT NULL,
+  \`invoiceNumber\` varchar(100) NOT NULL,
+  \`saleDate\` varchar(50) NOT NULL,
+  \`productId\` varchar(50) NOT NULL,
+  \`productName\` varchar(255) NOT NULL,
+  \`sku\` varchar(100) NOT NULL,
+  \`serialNumber\` varchar(100) NOT NULL,
+  \`customerId\` varchar(50) NOT NULL,
+  \`customerName\` varchar(200) NOT NULL,
+  \`customerPhone\` varchar(50) NOT NULL,
+  \`warrantyType\` varchar(50) NOT NULL,
+  \`duration\` int(11) NOT NULL DEFAULT 12,
+  \`durationUnit\` varchar(50) NOT NULL DEFAULT 'MONTHS',
+  \`startDate\` varchar(50) NOT NULL,
+  \`expiryDate\` varchar(50) NOT NULL,
+  \`status\` varchar(50) NOT NULL DEFAULT 'ACTIVE',
+  \`terms\` text DEFAULT NULL,
+  \`notes\` text DEFAULT NULL,
+  \`createdBy\` varchar(100) DEFAULT NULL,
+  \`createdAt\` varchar(50) DEFAULT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- --------------------------------------------------------
+-- Table structure for \`warranty_claims\`
+-- --------------------------------------------------------
+DROP TABLE IF EXISTS \`warranty_claims\`;
+CREATE TABLE \`warranty_claims\` (
+  \`id\` varchar(50) NOT NULL PRIMARY KEY,
+  \`claimTicketNo\` varchar(100) NOT NULL UNIQUE,
+  \`warrantyRecordId\` varchar(50) DEFAULT NULL,
+  \`invoiceNumber\` varchar(100) NOT NULL,
+  \`productId\` varchar(50) NOT NULL,
+  \`productName\` varchar(255) NOT NULL,
+  \`serialNumber\` varchar(100) NOT NULL,
+  \`customerId\` varchar(50) NOT NULL,
+  \`customerName\` varchar(200) NOT NULL,
+  \`customerPhone\` varchar(50) NOT NULL,
+  \`issueDescription\` text NOT NULL,
+  \`physicalCondition\` text DEFAULT NULL,
+  \`claimDate\` varchar(50) NOT NULL,
+  \`expectedReturnDate\` varchar(50) DEFAULT NULL,
+  \`status\` varchar(50) NOT NULL DEFAULT 'RECEIVED',
+  \`claimType\` varchar(50) NOT NULL DEFAULT 'REPAIR',
+  \`repairCost\` decimal(12,2) NOT NULL DEFAULT 0.00,
+  \`customerCharge\` decimal(12,2) NOT NULL DEFAULT 0.00,
+  \`replacementSerialNumber\` varchar(100) DEFAULT NULL,
+  \`supplierId\` varchar(50) DEFAULT NULL,
+  \`supplierName\` varchar(200) DEFAULT NULL,
+  \`technicianNotes\` text DEFAULT NULL,
+  \`actionsHistory_json\` longtext DEFAULT NULL,
+  \`createdBy\` varchar(100) DEFAULT NULL,
+  \`createdAt\` varchar(50) DEFAULT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+\n`;
+
+  // =========================================================================
+  // INSERT LIVE DATA CHUNKS (FAULT-TOLERANT & HIGH PERFORMANCE)
+  // =========================================================================
+
+  // 1. Company Settings
+  if (state.companySettings) {
+    const cs = state.companySettings;
+    sql += `-- Dumping data for table \`company_settings\`\n`;
+    sql += `INSERT INTO \`company_settings\` (\`id\`, \`name\`, \`nameBn\`, \`slogan\`, \`phone\`, \`email\`, \`website\`, \`address\`, \`taxNumber\`, \`currencySymbol\`, \`currencyCode\`, \`logoUrl\`, \`signatureUrl\`, \`invoiceFooter\`, \`defaultVatPercent\`, \`invoicePrintType\`, \`invoiceTemplate\`, \`invoiceColorTheme\`, \`invoiceCustomPrimaryColor\`, \`invoiceCustomAccentColor\`, \`dashboardColorTheme\`, \`sidebarColorTheme\`, \`sidebarCustomColor\`, \`smsSenderId\`, \`apiEndpoint\`, \`autoSyncEnabled\`, \`autoSyncIntervalSeconds\`, \`productGenerics_json\`, \`productManufacturers_json\`, \`productUnits_json\`) VALUES (\n`;
+    sql += `  'main_company',\n`;
+    sql += `  ${sqlEscape(cs.name || '')},\n`;
+    sql += `  ${sqlEscape(cs.nameBn || '')},\n`;
+    sql += `  ${sqlEscape(cs.slogan || '')},\n`;
+    sql += `  ${sqlEscape(cs.phone || '')},\n`;
+    sql += `  ${sqlEscape(cs.email || '')},\n`;
+    sql += `  ${sqlEscape(cs.website || '')},\n`;
+    sql += `  ${sqlEscape(cs.address || '')},\n`;
+    sql += `  ${sqlEscape(cs.taxNumber || '')},\n`;
+    sql += `  ${sqlEscape(cs.currencySymbol || '৳')},\n`;
+    sql += `  ${sqlEscape(cs.currencyCode || 'BDT')},\n`;
+    sql += `  ${sqlEscape(cs.logoUrl || '')},\n`;
+    sql += `  ${sqlEscape(cs.signatureUrl || '')},\n`;
+    sql += `  ${sqlEscape(cs.invoiceFooter || '')},\n`;
+    sql += `  ${cs.defaultVatPercent || 0},\n`;
+    sql += `  ${sqlEscape(cs.invoicePrintType || 'A4')},\n`;
+    sql += `  ${sqlEscape(cs.invoiceTemplate || 'MODERN_MINIMAL')},\n`;
+    sql += `  ${sqlEscape(cs.invoiceColorTheme || 'INDIGO_VIOLET')},\n`;
+    sql += `  ${sqlEscape(cs.invoiceCustomPrimaryColor || '#4F46E5')},\n`;
+    sql += `  ${sqlEscape(cs.invoiceCustomAccentColor || '#06B6D4')},\n`;
+    sql += `  ${sqlEscape(cs.dashboardColorTheme || 'INDIGO')},\n`;
+    sql += `  ${sqlEscape(cs.sidebarColorTheme || 'INDIGO')},\n`;
+    sql += `  ${sqlEscape(cs.sidebarCustomColor || '#4F46E5')},\n`;
+    sql += `  ${sqlEscape(cs.smsSenderId || '')},\n`;
+    sql += `  ${sqlEscape(cs.apiEndpoint || '')},\n`;
+    sql += `  ${cs.autoSyncEnabled !== false ? 1 : 0},\n`;
+    sql += `  ${cs.autoSyncIntervalSeconds || 5},\n`;
+    sql += `  ${sqlEscape(cs.productGenerics || [])},\n`;
+    sql += `  ${sqlEscape(cs.productManufacturers || [])},\n`;
+    sql += `  ${sqlEscape(cs.productUnits || ['Pcs', 'CTN', 'Kg', 'Ltr', 'Box', 'Pack', 'Dozen', 'Meter', 'Bag'])}\n`;
+    sql += `);\n\n`;
+  }
+
+  // 2. Users
+  if (state.users && state.users.length > 0) {
+    const userColumns = ['id', 'username', 'password', 'fullName', 'role', 'email', 'phone', 'isActive', 'permissions_json', 'subPermissions_json', 'avatar', 'lastLogin', 'lowStockEmailAlerts', 'lowStockSmsAlerts'];
+    const userRows = state.users.map(u => [
+      sqlEscape(u.id),
+      sqlEscape(u.username),
+      sqlEscape(u.password || ''),
+      sqlEscape(u.fullName),
+      sqlEscape(u.role),
+      sqlEscape(u.email || ''),
+      sqlEscape(u.phone || ''),
+      u.isActive ? '1' : '0',
+      sqlEscape(u.permissions || []),
+      sqlEscape(u.subPermissions || []),
+      sqlEscape(u.avatar || ''),
+      sqlEscape(u.lastLogin || ''),
+      u.lowStockEmailAlerts ? '1' : '0',
+      u.lowStockSmsAlerts ? '1' : '0',
+    ]);
+    sql += buildChunkedInserts('users', userColumns, userRows);
+  }
+
+  // 3. Categories
+  if (state.categories && state.categories.length > 0) {
+    const catColumns = ['id', 'name', 'nameBn', 'code', 'description', 'icon', 'createdBy'];
+    const catRows = state.categories.map(c => [
+      sqlEscape(c.id),
+      sqlEscape(c.name),
+      sqlEscape(c.nameBn || ''),
+      sqlEscape(c.code || ''),
+      sqlEscape(c.description || ''),
+      sqlEscape(c.icon || 'folder'),
+      sqlEscape(c.createdBy || 'Admin'),
+    ]);
+    sql += buildChunkedInserts('categories', catColumns, catRows);
+  }
+
+  // 4. Products & Medicines
+  if (state.products && state.products.length > 0) {
+    const prodColumns = [
+      'id', 'sku', 'barcode', 'name', 'nameBn', 'medicine', 'medicine_name', 'categoryId', 'categoryName',
+      'purchasePrice', 'salesPrice', 'discount', 'discountType', 'expDate',
+      'generic', 'manufacturer', 'dosageForm', 'strength', 'rackLocation', 'stripSize',
+      'diseases_json', 'dosageSchedule', 'mealTiming', 'duration', 'instructions', 'precautions',
+      'reorderLevel', 'stock', 'unit', 'batchNumber', 'batches_json',
+      'image', 'imageUrl', 'description', 'hasWarranty', 'warrantyDuration',
+      'warrantyUnit', 'warrantyType', 'warrantyTerms', 'requiresSerialNo',
+      'createdBy', 'created_at'
+    ];
+    const prodRows = state.products.map(p => [
+      sqlEscape(p.id),
+      sqlEscape(p.sku),
+      sqlEscape(p.barcode || p.sku),
+      sqlEscape(p.name),
+      sqlEscape(p.nameBn || ''),
+      sqlEscape(p.name),
+      sqlEscape(p.name),
+      sqlEscape(p.categoryId || ''),
+      sqlEscape(p.categoryName || ''),
+      (p.purchasePrice || 0).toString(),
+      (p.salesPrice || 0).toString(),
+      (p.discount || 0).toString(),
+      sqlEscape(p.discountType || 'flat'),
+      sqlEscape(p.expDate || ''),
+      sqlEscape(p.generic || ''),
+      sqlEscape(p.manufacturer || ''),
+      sqlEscape(p.dosageForm || ''),
+      sqlEscape(p.strength || ''),
+      sqlEscape(p.rackLocation || ''),
+      p.stripSize ? p.stripSize.toString() : 'NULL',
+      sqlEscape(p.diseases || []),
+      sqlEscape(p.dosageSchedule || ''),
+      sqlEscape(p.mealTiming || ''),
+      sqlEscape(p.duration || ''),
+      sqlEscape(p.instructions || ''),
+      sqlEscape(p.precautions || ''),
+      (p.reorderLevel || 5).toString(),
+      (p.stock || 0).toString(),
+      sqlEscape(p.unit || 'Pcs'),
+      sqlEscape(p.batchNumber || ''),
+      sqlEscape(p.batches || []),
+      sqlEscape(p.image || p.imageUrl || ''),
+      sqlEscape(p.imageUrl || p.image || ''),
+      sqlEscape(p.description || ''),
+      p.hasWarranty ? '1' : '0',
+      p.warrantyDuration ? p.warrantyDuration.toString() : 'NULL',
+      sqlEscape(p.warrantyUnit || ''),
+      sqlEscape(p.warrantyType || ''),
+      sqlEscape(p.warrantyTerms || ''),
+      p.requiresSerialNo ? '1' : '0',
+      sqlEscape(p.createdBy || 'Admin'),
+      sqlEscape(p.createdAt || ''),
+    ]);
+    sql += buildChunkedInserts('products', prodColumns, prodRows);
+
+    // Also populate dedicated medicines table
+    const medColumns = [
+      'id', 'medicine', 'medicine_name', 'sku', 'barcode', 'generic', 'brand',
+      'manufacturer', 'strength', 'dosage_form', 'category', 'purchase_price',
+      'sales_price', 'stock', 'unit', 'exp_date', 'batch_no', 'rack_location', 'created_at'
+    ];
+    const medRows = state.products.map(p => [
+      sqlEscape(p.id),
+      sqlEscape(p.name),
+      sqlEscape(p.name),
+      sqlEscape(p.sku),
+      sqlEscape(p.barcode || p.sku),
+      sqlEscape(p.generic || ''),
+      sqlEscape(p.manufacturer || ''),
+      sqlEscape(p.manufacturer || ''),
+      sqlEscape(p.strength || ''),
+      sqlEscape(p.dosageForm || ''),
+      sqlEscape(p.categoryName || ''),
+      (p.purchasePrice || 0).toString(),
+      (p.salesPrice || 0).toString(),
+      (p.stock || 0).toString(),
+      sqlEscape(p.unit || 'Pcs'),
+      sqlEscape(p.expDate || ''),
+      sqlEscape(p.batchNumber || ''),
+      sqlEscape(p.rackLocation || ''),
+      sqlEscape(p.createdAt || ''),
+    ]);
+    sql += buildChunkedInserts('medicines', medColumns, medRows);
+  }
+
+  // 4b. Disease Categories
+  if (state.diseaseCategories && state.diseaseCategories.length > 0) {
+    const disCatColumns = ['id', 'name', 'nameBn', 'isDefault'];
+    const disCatRows = state.diseaseCategories.map(dc => [
+      sqlEscape(dc.id),
+      sqlEscape(dc.name),
+      sqlEscape(dc.nameBn),
+      dc.isDefault ? '1' : '0'
+    ]);
+    sql += buildChunkedInserts('disease_categories', disCatColumns, disCatRows);
+  }
+
+  // 4c. Disease Master
+  if (state.diseaseMaster && state.diseaseMaster.length > 0) {
+    const disColumns = ['id', 'diseaseName', 'diseaseNameBn', 'category', 'categoryBn', 'symptoms_json', 'description', 'recommendedMedicines_json'];
+    const disRows = state.diseaseMaster.map(d => [
+      sqlEscape(d.id),
+      sqlEscape(d.diseaseName),
+      sqlEscape(d.diseaseNameBn),
+      sqlEscape(d.category),
+      sqlEscape(d.categoryBn || ''),
+      sqlEscape(d.symptoms || []),
+      sqlEscape(d.description || ''),
+      sqlEscape(d.recommendedMedicines || [])
+    ]);
+    sql += buildChunkedInserts('disease_master', disColumns, disRows);
+  }
+
+  // 5. Parties (Customers & Suppliers)
+  if (state.parties && state.parties.length > 0) {
+    const partyColumns = ['id', 'serialNumber', 'type', 'name', 'nameBn', 'phone', 'email', 'companyName', 'address', 'openingBalance', 'currentBalance', 'creditLimit', 'status', 'taxNumber', 'bankDetails', 'createdBy', 'created_at'];
+    const partyRows = state.parties.map(p => [
+      sqlEscape(p.id),
+      sqlEscape(p.serialNumber || ''),
+      sqlEscape(p.type),
+      sqlEscape(p.name),
+      sqlEscape(p.nameBn || ''),
+      sqlEscape(p.phone),
+      sqlEscape(p.email || ''),
+      sqlEscape(p.companyName || ''),
+      sqlEscape(p.address || ''),
+      (p.openingBalance || 0).toString(),
+      (p.currentBalance || 0).toString(),
+      (p.creditLimit || 0).toString(),
+      sqlEscape(p.status || 'ACTIVE'),
+      sqlEscape(p.taxNumber || ''),
+      sqlEscape(p.bankDetails || ''),
+      sqlEscape(p.createdBy || 'Admin'),
+      sqlEscape(p.createdAt || ''),
+    ]);
+    sql += buildChunkedInserts('parties', partyColumns, partyRows);
+  }
+
+  // 6. Wallets
+  if (state.wallets && state.wallets.length > 0) {
+    const walletColumns = ['id', 'name', 'nameBn', 'type', 'accountNumber', 'bankName', 'branch', 'balance', 'isActive', 'colorCode', 'createdBy'];
+    const walletRows = state.wallets.map(w => [
+      sqlEscape(w.id),
+      sqlEscape(w.name),
+      sqlEscape(w.nameBn || ''),
+      sqlEscape(w.type),
+      sqlEscape(w.accountNumber || ''),
+      sqlEscape(w.bankName || ''),
+      sqlEscape(w.branch || ''),
+      (w.balance || 0).toString(),
+      w.isActive ? '1' : '0',
+      sqlEscape(w.colorCode || ''),
+      sqlEscape(w.createdBy || 'Admin'),
+    ]);
+    sql += buildChunkedInserts('wallets', walletColumns, walletRows);
+  }
+
+  // 7. Sales Invoices
+  if (state.saleInvoices && state.saleInvoices.length > 0) {
+    const saleColumns = ['id', 'invoiceNumber', 'date', 'customerId', 'customerName', 'customerPhone', 'customerAddress', 'subtotal', 'discount', 'discountType', 'vatAmount', 'grandTotal', 'paidAmount', 'dueAmount', 'paymentMethod', 'walletId', 'walletName', 'status', 'notes', 'cashierName', 'isInstallmentSale', 'installmentPlanId', 'items_json', 'createdBy', 'created_at'];
+    const saleRows = state.saleInvoices.map(s => [
+      sqlEscape(s.id),
+      sqlEscape(s.invoiceNumber),
+      sqlEscape(s.date),
+      sqlEscape(s.customerId || ''),
+      sqlEscape(s.customerName || ''),
+      sqlEscape(s.customerPhone || ''),
+      sqlEscape(s.customerAddress || ''),
+      (s.subtotal || 0).toString(),
+      (s.discount || 0).toString(),
+      sqlEscape(s.discountType || 'flat'),
+      (s.vatAmount || 0).toString(),
+      (s.grandTotal || 0).toString(),
+      (s.paidAmount || 0).toString(),
+      (s.dueAmount || 0).toString(),
+      sqlEscape(s.paymentMethod || 'CASH'),
+      sqlEscape(s.walletId || ''),
+      sqlEscape(s.walletName || ''),
+      sqlEscape(s.status || 'PAID'),
+      sqlEscape(s.notes || ''),
+      sqlEscape(s.cashierName || ''),
+      s.isInstallmentSale ? '1' : '0',
+      sqlEscape(s.installmentPlanId || ''),
+      sqlEscape(s.items || []),
+      sqlEscape(s.createdBy || s.cashierName || 'Admin'),
+      sqlEscape(s.createdAt || ''),
+    ]);
+    sql += buildChunkedInserts('sales_invoices', saleColumns, saleRows);
+  }
+
+  // 8. Sales Returns
+  if (state.saleReturns && state.saleReturns.length > 0) {
+    const sReturnColumns = ['id', 'returnNumber', 'originalInvoiceNumber', 'invoiceId', 'date', 'customerId', 'customerName', 'totalRefund', 'refundWalletId', 'refundWalletName', 'reason', 'items_json', 'createdBy', 'created_at'];
+    const sReturnRows = state.saleReturns.map(r => [
+      sqlEscape(r.id),
+      sqlEscape(r.returnNumber),
+      sqlEscape(r.originalInvoiceNumber),
+      sqlEscape(r.invoiceId),
+      sqlEscape(r.date),
+      sqlEscape(r.customerId || ''),
+      sqlEscape(r.customerName || ''),
+      (r.totalRefund || 0).toString(),
+      sqlEscape(r.refundWalletId || ''),
+      sqlEscape(r.refundWalletName || ''),
+      sqlEscape(r.reason || ''),
+      sqlEscape(r.items || []),
+      sqlEscape(r.createdBy || 'Admin'),
+      sqlEscape(r.createdAt || ''),
+    ]);
+    sql += buildChunkedInserts('sales_returns', sReturnColumns, sReturnRows);
+  }
+
+  // 9. Quotations (Price Quotes)
+  if (state.quotations && state.quotations.length > 0) {
+    const quoteColumns = ['id', 'quotationNumber', 'date', 'validUntil', 'customerId', 'customerName', 'customerPhone', 'customerAddress', 'subtotal', 'discount', 'discountType', 'vatAmount', 'grandTotal', 'status', 'salesPerson', 'notes', 'items_json', 'createdBy', 'created_at'];
+    const quoteRows = state.quotations.map(q => [
+      sqlEscape(q.id),
+      sqlEscape(q.quotationNumber),
+      sqlEscape(q.date),
+      sqlEscape((q as any).validUntil || q.expiryDate || ''),
+      sqlEscape(q.customerId || ''),
+      sqlEscape(q.customerName || ''),
+      sqlEscape(q.customerPhone || ''),
+      sqlEscape(q.customerAddress || ''),
+      (q.subtotal || 0).toString(),
+      (q.discount || 0).toString(),
+      sqlEscape(q.discountType || 'flat'),
+      (q.taxAmount || 0).toString(),
+      (q.grandTotal || 0).toString(),
+      sqlEscape(q.status || 'DRAFT'),
+      sqlEscape((q as any).salesPerson || q.createdBy || ''),
+      sqlEscape(q.notes || ''),
+      sqlEscape(q.items || []),
+      sqlEscape(q.createdBy || 'Admin'),
+      sqlEscape((q as any).createdAt || q.date || ''),
+    ]);
+    sql += buildChunkedInserts('quotations', quoteColumns, quoteRows);
+  }
+
+  // 9b. Sales Orders
+  if (state.salesOrders && state.salesOrders.length > 0) {
+    const soColumns = [
+      'id', 'orderNumber', 'date', 'deliveryDate', 'customerId', 'customerName', 
+      'customerPhone', 'customerAddress', 'subtotal', 'discount', 'discountType', 
+      'taxAmount', 'grandTotal', 'status', 'notes', 'walletId', 'paidAmount', 
+      'createdBy', 'convertedSaleInvoiceId', 'items_json', 'createdAt'
+    ];
+    const soRows = state.salesOrders.map(so => [
+      sqlEscape(so.id),
+      sqlEscape(so.orderNumber),
+      sqlEscape(so.date),
+      sqlEscape(so.deliveryDate || ''),
+      sqlEscape(so.customerId),
+      sqlEscape(so.customerName),
+      sqlEscape(so.customerPhone),
+      sqlEscape(so.customerAddress || ''),
+      (so.subtotal || 0).toString(),
+      (so.discount || 0).toString(),
+      sqlEscape(so.discountType || 'flat'),
+      (so.taxAmount || 0).toString(),
+      (so.grandTotal || 0).toString(),
+      sqlEscape(so.status),
+      sqlEscape(so.notes || ''),
+      sqlEscape(so.walletId || ''),
+      (so.paidAmount || 0).toString(),
+      sqlEscape(so.createdBy || ''),
+      sqlEscape(so.convertedSaleInvoiceId || ''),
+      sqlEscape(so.items || []),
+      sqlEscape(so.createdAt || '')
+    ]);
+    sql += buildChunkedInserts('sales_orders', soColumns, soRows);
+  }
+
+  // 10. Purchase Invoices
+  if (state.purchaseInvoices && state.purchaseInvoices.length > 0) {
+    const purColumns = ['id', 'billNumber', 'supplierInvoiceNo', 'date', 'supplierId', 'supplierName', 'supplierPhone', 'subtotal', 'discount', 'taxAmount', 'grandTotal', 'paidAmount', 'dueAmount', 'paymentMethod', 'walletId', 'walletName', 'status', 'notes', 'items_json', 'createdBy', 'created_at'];
+    const purRows = state.purchaseInvoices.map(p => [
+      sqlEscape(p.id),
+      sqlEscape(p.billNumber),
+      sqlEscape(p.supplierInvoiceNo || ''),
+      sqlEscape(p.date),
+      sqlEscape(p.supplierId || ''),
+      sqlEscape(p.supplierName || ''),
+      sqlEscape(p.supplierPhone || ''),
+      (p.subtotal || 0).toString(),
+      (p.discount || 0).toString(),
+      (p.taxAmount || 0).toString(),
+      (p.grandTotal || 0).toString(),
+      (p.paidAmount || 0).toString(),
+      (p.dueAmount || 0).toString(),
+      sqlEscape(p.paymentMethod || 'CASH'),
+      sqlEscape(p.walletId || ''),
+      sqlEscape(p.walletName || ''),
+      sqlEscape(p.status || 'PAID'),
+      sqlEscape(p.notes || ''),
+      sqlEscape(p.items || []),
+      sqlEscape(p.createdBy || 'Admin'),
+      sqlEscape(p.createdAt || ''),
+    ]);
+    sql += buildChunkedInserts('purchase_invoices', purColumns, purRows);
+  }
+
+  // 11. Purchase Returns
+  if (state.purchaseReturns && state.purchaseReturns.length > 0) {
+    const pReturnColumns = ['id', 'returnNumber', 'originalBillNumber', 'purchaseId', 'date', 'supplierId', 'supplierName', 'totalAmount', 'refundWalletId', 'refundWalletName', 'reason', 'items_json', 'createdBy', 'created_at'];
+    const pReturnRows = state.purchaseReturns.map(r => [
+      sqlEscape(r.id),
+      sqlEscape(r.returnNumber),
+      sqlEscape(r.originalBillNumber),
+      sqlEscape(r.purchaseId),
+      sqlEscape(r.date),
+      sqlEscape(r.supplierId || ''),
+      sqlEscape(r.supplierName || ''),
+      (r.totalAmount || 0).toString(),
+      sqlEscape(r.refundWalletId || ''),
+      sqlEscape(r.refundWalletName || ''),
+      sqlEscape(r.reason || ''),
+      sqlEscape(r.items || []),
+      sqlEscape(r.createdBy || 'Admin'),
+      sqlEscape(r.createdAt || ''),
+    ]);
+    sql += buildChunkedInserts('purchase_returns', pReturnColumns, pReturnRows);
+  }
+
+  // 12. Purchase Orders (PO)
+  if (state.purchaseOrders && state.purchaseOrders.length > 0) {
+    const poColumns = ['id', 'poNumber', 'supplierId', 'supplierName', 'supplierPhone', 'date', 'expectedDeliveryDate', 'totalAmount', 'status', 'notes', 'items_json', 'createdBy', 'created_at'];
+    const poRows = state.purchaseOrders.map(po => [
+      sqlEscape(po.id),
+      sqlEscape(po.poNumber),
+      sqlEscape(po.supplierId || ''),
+      sqlEscape(po.supplierName || ''),
+      sqlEscape(po.supplierPhone || ''),
+      sqlEscape(po.date),
+      sqlEscape(po.expectedDeliveryDate || ''),
+      (po.grandTotal || 0).toString(),
+      sqlEscape(po.status || 'PENDING'),
+      sqlEscape(po.notes || ''),
+      sqlEscape(po.items || []),
+      sqlEscape(po.createdBy || 'Admin'),
+      sqlEscape(po.createdAt || ''),
+    ]);
+    sql += buildChunkedInserts('purchase_orders', poColumns, poRows);
+  }
+
+  // 13. Deleted Sales Invoices
+  if (state.deletedSaleInvoices && state.deletedSaleInvoices.length > 0) {
+    const delColumns = ['id', 'invoiceNumber', 'deletedAt', 'deletedBy', 'reason', 'originalInvoice_json'];
+    const delRows = state.deletedSaleInvoices.map(d => [
+      sqlEscape(d.id),
+      sqlEscape(d.invoiceNumber || d.invoiceSnapshot?.invoiceNumber || ''),
+      sqlEscape(d.deletedAt || ''),
+      sqlEscape(typeof d.deletedBy === 'object' ? d.deletedBy?.fullName : (d.deletedBy || '')),
+      sqlEscape(d.deletionReason || ''),
+      sqlEscape(d.invoiceSnapshot || {}),
+    ]);
+    sql += buildChunkedInserts('deleted_sales_invoices', delColumns, delRows);
+  }
+
+  // 14. Installment Schemes (EMI)
+  if (state.installmentSchemes && state.installmentSchemes.length > 0) {
+    const emiColumns = ['id', 'schemeNumber', 'customerId', 'customerName', 'customerPhone', 'invoiceId', 'invoiceNumber', 'productName', 'totalPrice', 'downPayment', 'principalAmount', 'interestRate', 'interestAmount', 'totalPayable', 'totalInstallments', 'frequency', 'emiAmount', 'startDate', 'status', 'guarantorName', 'guarantorPhone', 'guarantorNid', 'notes', 'schedules_json', 'createdBy', 'created_at'];
+    const emiRows = state.installmentSchemes.map(e => [
+      sqlEscape(e.id),
+      sqlEscape(e.schemeNumber),
+      sqlEscape(e.customerId),
+      sqlEscape(e.customerName),
+      sqlEscape(e.customerPhone),
+      sqlEscape(e.invoiceId || ''),
+      sqlEscape(e.invoiceNumber || ''),
+      sqlEscape(e.productName),
+      (e.totalPrice || 0).toString(),
+      (e.downPayment || 0).toString(),
+      (e.principalAmount || 0).toString(),
+      (e.interestRate || 0).toString(),
+      (e.interestAmount || 0).toString(),
+      (e.totalPayable || 0).toString(),
+      (e.totalInstallments || 6).toString(),
+      sqlEscape(e.frequency || 'MONTHLY'),
+      (e.emiAmount || 0).toString(),
+      sqlEscape(e.startDate),
+      sqlEscape(e.status || 'ACTIVE'),
+      sqlEscape(e.guarantorName || ''),
+      sqlEscape(e.guarantorPhone || ''),
+      sqlEscape(e.guarantorNid || ''),
+      sqlEscape(e.notes || ''),
+      sqlEscape(e.schedules || []),
+      sqlEscape(e.createdBy || 'Admin'),
+      sqlEscape(e.createdAt || ''),
+    ]);
+    sql += buildChunkedInserts('installment_schemes', emiColumns, emiRows);
+  }
+
+  // 15. Expense Categories
+  if (state.expenseCategories && state.expenseCategories.length > 0) {
+    const expCatColumns = ['id', 'name', 'nameBn', 'code', 'description', 'budgetMonthly', 'createdBy'];
+    const expCatRows = state.expenseCategories.map(ec => [
+      sqlEscape(ec.id),
+      sqlEscape(ec.name),
+      sqlEscape(ec.nameBn || ''),
+      sqlEscape(ec.code),
+      sqlEscape(ec.description || ''),
+      (ec.budgetMonthly || 0).toString(),
+      sqlEscape(ec.createdBy || 'Admin'),
+    ]);
+    sql += buildChunkedInserts('expense_categories', expCatColumns, expCatRows);
+  }
+
+  // 16. Expense Vouchers
+  if (state.expenseVouchers && state.expenseVouchers.length > 0) {
+    const expColumns = ['id', 'voucherNo', 'date', 'categoryId', 'categoryName', 'category', 'amount', 'walletId', 'walletName', 'payee', 'receiptNo', 'note', 'remarks', 'createdBy', 'created_at'];
+    const expRows = state.expenseVouchers.map(ev => [
+      sqlEscape(ev.id),
+      sqlEscape(ev.voucherNo),
+      sqlEscape(ev.date),
+      sqlEscape(ev.categoryId),
+      sqlEscape(ev.categoryName),
+      sqlEscape(ev.category || ''),
+      (ev.amount || 0).toString(),
+      sqlEscape(ev.walletId || ''),
+      sqlEscape(ev.walletName || ''),
+      sqlEscape(ev.payee || ''),
+      sqlEscape(ev.receiptNo || ''),
+      sqlEscape(ev.note || ''),
+      sqlEscape(ev.remarks || ''),
+      sqlEscape(ev.createdBy || 'Admin'),
+      sqlEscape(ev.createdAt || ''),
+    ]);
+    sql += buildChunkedInserts('expense_vouchers', expColumns, expRows);
+  }
+
+  // 17. Employees
+  if (state.employees && state.employees.length > 0) {
+    const empColumns = ['id', 'employeeCode', 'name', 'nameBn', 'phone', 'email', 'designation', 'department', 'joiningDate', 'baseSalary', 'houseRentAllowance', 'medicalAllowance', 'conveyanceAllowance', 'status', 'bankAccount', 'nid', 'address', 'resignedDate', 'resignationReason', 'settlementNotes', 'finalSettlementAmount', 'finalSettlementPaid', 'settlementWalletId', 'settlementWalletName', 'createdBy'];
+    const empRows = state.employees.map(emp => [
+      sqlEscape(emp.id),
+      sqlEscape(emp.employeeCode),
+      sqlEscape(emp.name),
+      sqlEscape(emp.nameBn || ''),
+      sqlEscape(emp.phone),
+      sqlEscape(emp.email || ''),
+      sqlEscape(emp.designation),
+      sqlEscape(emp.department),
+      sqlEscape(emp.joiningDate || ''),
+      (emp.baseSalary || 0).toString(),
+      (emp.houseRentAllowance || 0).toString(),
+      (emp.medicalAllowance || 0).toString(),
+      (emp.conveyanceAllowance || 0).toString(),
+      sqlEscape(emp.status || 'ACTIVE'),
+      sqlEscape(emp.bankAccount || ''),
+      sqlEscape(emp.nid || ''),
+      sqlEscape(emp.address || ''),
+      sqlEscape(emp.resignedDate || ''),
+      sqlEscape(emp.resignationReason || ''),
+      sqlEscape(emp.settlementNotes || ''),
+      (emp.finalSettlementAmount || 0).toString(),
+      emp.finalSettlementPaid ? '1' : '0',
+      sqlEscape(emp.settlementWalletId || ''),
+      sqlEscape(emp.settlementWalletName || ''),
+      sqlEscape(emp.createdBy || 'Admin'),
+    ]);
+    sql += buildChunkedInserts('employees', empColumns, empRows);
+  }
+
+  // 18. Advance Salaries
+  if (state.advanceSalaries && state.advanceSalaries.length > 0) {
+    const advColumns = ['id', 'voucherNo', 'employeeId', 'employeeName', 'amount', 'date', 'walletId', 'walletName', 'reason', 'isDeducted', 'deductedInPayrollMonth', 'createdBy', 'created_at'];
+    const advRows = state.advanceSalaries.map(a => [
+      sqlEscape(a.id),
+      sqlEscape(a.voucherNo),
+      sqlEscape(a.employeeId),
+      sqlEscape(a.employeeName),
+      (a.amount || 0).toString(),
+      sqlEscape(a.date),
+      sqlEscape(a.walletId || ''),
+      sqlEscape(a.walletName || ''),
+      sqlEscape(a.reason || ''),
+      a.isDeducted ? '1' : '0',
+      sqlEscape(a.deductedInPayrollMonth || ''),
+      sqlEscape(a.createdBy || 'Admin'),
+      sqlEscape(a.createdAt || ''),
+    ]);
+    sql += buildChunkedInserts('advance_salaries', advColumns, advRows);
+  }
+
+  // 19. Payroll History
+  if (state.payrollHistory && state.payrollHistory.length > 0) {
+    const payColumns = ['id', 'payrollMonth', 'employeeId', 'employeeName', 'employeeCode', 'designation', 'baseSalary', 'allowances', 'bonus', 'advanceDeduction', 'fineDeduction', 'grossPay', 'payableAmount', 'paidAmount', 'dueAmount', 'totalPaidSoFar', 'paymentType', 'installmentNo', 'notes', 'netPay', 'paymentDate', 'walletId', 'walletName', 'status', 'voucherNo', 'createdBy', 'created_at'];
+    const payRows = state.payrollHistory.map(ph => [
+      sqlEscape(ph.id),
+      sqlEscape(ph.payrollMonth),
+      sqlEscape(ph.employeeId),
+      sqlEscape(ph.employeeName),
+      sqlEscape(ph.employeeCode),
+      sqlEscape(ph.designation),
+      (ph.baseSalary || 0).toString(),
+      (ph.allowances || 0).toString(),
+      (ph.bonus || 0).toString(),
+      (ph.advanceDeduction || 0).toString(),
+      (ph.fineDeduction || 0).toString(),
+      (ph.grossPay || 0).toString(),
+      (ph.payableAmount || 0).toString(),
+      (ph.paidAmount || 0).toString(),
+      (ph.dueAmount || 0).toString(),
+      (ph.totalPaidSoFar || 0).toString(),
+      sqlEscape(ph.paymentType || ''),
+      (ph.installmentNo || 1).toString(),
+      sqlEscape(ph.notes || ''),
+      (ph.netPay || 0).toString(),
+      sqlEscape(ph.paymentDate),
+      sqlEscape(ph.walletId || ''),
+      sqlEscape(ph.walletName || ''),
+      sqlEscape(ph.status || 'PAID'),
+      sqlEscape(ph.voucherNo),
+      sqlEscape(ph.createdBy || 'Admin'),
+      sqlEscape(ph.createdAt || ''),
+    ]);
+    sql += buildChunkedInserts('payroll_history', payColumns, payRows);
+  }
+
+  // 20. DayBook Entries
+  if (state.dayBookEntries && state.dayBookEntries.length > 0) {
+    const dbColumns = ['id', 'voucherNo', 'date', 'type', 'flow', 'partyId', 'partyName', 'partyType', 'amount', 'walletId', 'walletName', 'referenceId', 'referenceNo', 'remarks', 'createdBy', 'created_at'];
+    const dbRows = state.dayBookEntries.map(d => [
+      sqlEscape(d.id),
+      sqlEscape(d.voucherNo),
+      sqlEscape(d.date),
+      sqlEscape(d.type),
+      sqlEscape(d.flow),
+      sqlEscape(d.partyId || ''),
+      sqlEscape(d.partyName || ''),
+      sqlEscape(d.partyType || ''),
+      (d.amount || 0).toString(),
+      sqlEscape(d.walletId || ''),
+      sqlEscape(d.walletName || ''),
+      sqlEscape(d.referenceId || ''),
+      sqlEscape(d.referenceNo || ''),
+      sqlEscape(d.remarks || ''),
+      sqlEscape(d.createdBy || 'Admin'),
+      sqlEscape(d.createdAt || ''),
+    ]);
+    sql += buildChunkedInserts('daybook_entries', dbColumns, dbRows);
+  }
+
+  // 21. Cash Adjustments
+  if (state.cashAdjustments && state.cashAdjustments.length > 0) {
+    const caColumns = ['id', 'voucherNo', 'date', 'type', 'amount', 'walletId', 'walletName', 'reason', 'authorizedBy', 'createdBy', 'created_at'];
+    const caRows = state.cashAdjustments.map(ca => [
+      sqlEscape(ca.id),
+      sqlEscape(ca.voucherNo),
+      sqlEscape(ca.date),
+      sqlEscape(ca.type),
+      (ca.amount || 0).toString(),
+      sqlEscape(ca.walletId),
+      sqlEscape(ca.walletName || ''),
+      sqlEscape(ca.reason || ''),
+      sqlEscape(ca.authorizedBy || ''),
+      sqlEscape(ca.createdBy || ca.authorizedBy || 'Admin'),
+      sqlEscape(ca.createdAt || ''),
+    ]);
+    sql += buildChunkedInserts('cash_adjustments', caColumns, caRows);
+  }
+
+  // 22. Activity Logs
+  if (state.activityLogs && state.activityLogs.length > 0) {
+    const actColumns = ['id', 'timestamp', 'userId', 'userName', 'role', 'action', 'module', 'details', 'ipAddress', 'metadata_json'];
+    const actRows = state.activityLogs.map(al => [
+      sqlEscape(al.id),
+      sqlEscape(al.timestamp),
+      sqlEscape(al.userId || ''),
+      sqlEscape(al.userName || ''),
+      sqlEscape(al.role || ''),
+      sqlEscape(al.actionType),
+      sqlEscape(al.title),
+      sqlEscape(al.description || ''),
+      sqlEscape(al.ip || '103.145.74.22'),
+      sqlEscape({ targetId: al.targetId, targetName: al.targetName, severity: al.severity, location: al.location, device: al.device }),
+    ]);
+    sql += buildChunkedInserts('activity_logs', actColumns, actRows);
+  }
+
+  // 23. Expired Return Logs
+  if (state.expiredReturnLogs && state.expiredReturnLogs.length > 0) {
+    const expLogColumns = ['id', 'date', 'productId', 'productName', 'sku', 'unit', 'quantity', 'purchasePrice', 'totalValue', 'actionType', 'notes', 'batchNumber', 'purchaseInvoiceNo', 'expDate', 'createdBy'];
+    const expLogRows = state.expiredReturnLogs.map(l => [
+      sqlEscape(l.id),
+      sqlEscape(l.date),
+      sqlEscape(l.productId),
+      sqlEscape(l.productName),
+      sqlEscape(l.sku),
+      sqlEscape(l.unit || 'Pcs'),
+      (l.quantity || 0).toString(),
+      (l.purchasePrice || 0).toString(),
+      (l.totalValue || 0).toString(),
+      sqlEscape(l.actionType),
+      sqlEscape(l.notes || ''),
+      sqlEscape(l.batchNumber || ''),
+      sqlEscape(l.purchaseInvoiceNo || ''),
+      sqlEscape(l.expDate || ''),
+      sqlEscape(l.createdBy || 'Admin'),
+    ]);
+    sql += buildChunkedInserts('expired_return_logs', expLogColumns, expLogRows);
+  }
+
+  // 24. SMS Config
+  if (state.smsConfig) {
+    const sc = state.smsConfig;
+    sql += `-- Dumping data for table \`sms_config\`\n`;
+    sql += `INSERT INTO \`sms_config\` (\`id\`, \`enabled\`, \`provider\`, \`apiUrl\`, \`apiKey\`, \`senderId\`, \`username\`, \`password\`, \`clientId\`, \`httpMethod\`, \`requestFormat\`, \`customProviders_json\`, \`customToParam\`, \`customMsgParam\`, \`customKeyParam\`, \`customSenderParam\`, \`customUserParam\`, \`customPassParam\`, \`customHeaders\`, \`autoSendOnSale\`, \`autoSendOnPaymentIn\`, \`autoSendOnInstallmentReminder\`, \`autoSendOnWarrantyResolved\`, \`saleTemplate\`, \`paymentInTemplate\`, \`dueReminderTemplate\`, \`warrantyResolvedTemplate\`) VALUES (\n`;
+    sql += `  'main_sms_config',\n`;
+    sql += `  ${sc.enabled ? 1 : 0},\n`;
+    sql += `  ${sqlEscape(sc.provider)},\n`;
+    sql += `  ${sqlEscape(sc.apiUrl || '')},\n`;
+    sql += `  ${sqlEscape(sc.apiKey || '')},\n`;
+    sql += `  ${sqlEscape(sc.senderId || '')},\n`;
+    sql += `  ${sqlEscape(sc.username || '')},\n`;
+    sql += `  ${sqlEscape(sc.password || '')},\n`;
+    sql += `  ${sqlEscape(sc.clientId || '')},\n`;
+    sql += `  ${sqlEscape(sc.httpMethod || 'GET')},\n`;
+    sql += `  ${sqlEscape(sc.requestFormat || 'json')},\n`;
+    sql += `  ${sqlEscape(sc.customProviders || [])},\n`;
+    sql += `  ${sqlEscape(sc.customToParam || '')},\n`;
+    sql += `  ${sqlEscape(sc.customMsgParam || '')},\n`;
+    sql += `  ${sqlEscape(sc.customKeyParam || '')},\n`;
+    sql += `  ${sqlEscape(sc.customSenderParam || '')},\n`;
+    sql += `  ${sqlEscape(sc.customUserParam || '')},\n`;
+    sql += `  ${sqlEscape(sc.customPassParam || '')},\n`;
+    sql += `  ${sqlEscape(sc.customHeaders || '')},\n`;
+    sql += `  ${sc.autoSendOnSale !== false ? 1 : 0},\n`;
+    sql += `  ${sc.autoSendOnPaymentIn !== false ? 1 : 0},\n`;
+    sql += `  ${sc.autoSendOnInstallmentReminder !== false ? 1 : 0},\n`;
+    sql += `  ${sc.autoSendOnWarrantyResolved !== false ? 1 : 0},\n`;
+    sql += `  ${sqlEscape(sc.saleTemplate || '')},\n`;
+    sql += `  ${sqlEscape(sc.paymentInTemplate || '')},\n`;
+    sql += `  ${sqlEscape(sc.dueReminderTemplate || '')},\n`;
+    sql += `  ${sqlEscape(sc.warrantyResolvedTemplate || '')}\n`;
+    sql += `);\n\n`;
+  }
+
+  // 25. SMS Logs
+  if (state.smsLogs && state.smsLogs.length > 0) {
+    const smsColumns = ['id', 'recipientPhone', 'recipientName', 'message', 'type', 'status', 'responseDetails', 'date', 'time'];
+    const smsRows = state.smsLogs.map(sl => [
+      sqlEscape(sl.id),
+      sqlEscape(sl.recipientPhone),
+      sqlEscape(sl.recipientName || ''),
+      sqlEscape(sl.message),
+      sqlEscape(sl.type || 'TEST'),
+      sqlEscape(sl.status || 'SENT'),
+      sqlEscape(sl.responseDetails || ''),
+      sqlEscape(sl.date),
+      sqlEscape(sl.time || ''),
+    ]);
+    sql += buildChunkedInserts('sms_logs', smsColumns, smsRows);
+  }
+
+  // 26. Warranty Policies
+  if (state.warrantyPolicies && state.warrantyPolicies.length > 0) {
+    const wpColumns = ['id', 'name', 'nameBn', 'duration', 'durationUnit', 'terms', 'type', 'isDefault'];
+    const wpRows = state.warrantyPolicies.map(wp => [
+      sqlEscape(wp.id),
+      sqlEscape(wp.name),
+      sqlEscape(wp.nameBn || ''),
+      (wp.duration || 1).toString(),
+      sqlEscape(wp.durationUnit || 'MONTHS'),
+      sqlEscape(wp.terms || ''),
+      sqlEscape(wp.type || 'REPAIR'),
+      (wp.isDefault ? 1 : 0).toString(),
+    ]);
+    sql += buildChunkedInserts('warranty_policies', wpColumns, wpRows);
+  }
+
+  // 27. Warranty Records
+  if (state.warrantyRecords && state.warrantyRecords.length > 0) {
+    const wrColumns = ['id', 'warrantyCode', 'invoiceId', 'invoiceNumber', 'saleDate', 'productId', 'productName', 'sku', 'serialNumber', 'customerId', 'customerName', 'customerPhone', 'warrantyType', 'duration', 'durationUnit', 'startDate', 'expiryDate', 'status', 'terms', 'notes', 'createdBy', 'createdAt'];
+    const wrRows = state.warrantyRecords.map(wr => [
+      sqlEscape(wr.id),
+      sqlEscape(wr.warrantyCode),
+      sqlEscape(wr.invoiceId),
+      sqlEscape(wr.invoiceNumber),
+      sqlEscape(wr.saleDate),
+      sqlEscape(wr.productId),
+      sqlEscape(wr.productName),
+      sqlEscape(wr.sku),
+      sqlEscape(wr.serialNumber),
+      sqlEscape(wr.customerId),
+      sqlEscape(wr.customerName),
+      sqlEscape(wr.customerPhone),
+      sqlEscape(wr.warrantyType),
+      (wr.duration || 12).toString(),
+      sqlEscape(wr.durationUnit || 'MONTHS'),
+      sqlEscape(wr.startDate),
+      sqlEscape(wr.expiryDate),
+      sqlEscape(wr.status),
+      sqlEscape(wr.terms || ''),
+      sqlEscape(wr.notes || ''),
+      sqlEscape(wr.createdBy || 'Admin'),
+      sqlEscape(wr.createdAt || ''),
+    ]);
+    sql += buildChunkedInserts('warranty_records', wrColumns, wrRows);
+  }
+
+  // 28. Warranty Claims
+  if (state.warrantyClaims && state.warrantyClaims.length > 0) {
+    const wcColumns = ['id', 'claimTicketNo', 'warrantyRecordId', 'invoiceNumber', 'productId', 'productName', 'serialNumber', 'customerId', 'customerName', 'customerPhone', 'issueDescription', 'physicalCondition', 'claimDate', 'expectedReturnDate', 'status', 'claimType', 'repairCost', 'customerCharge', 'replacementSerialNumber', 'supplierId', 'supplierName', 'technicianNotes', 'actionsHistory_json', 'createdBy', 'createdAt'];
+    const wcRows = state.warrantyClaims.map(wc => [
+      sqlEscape(wc.id),
+      sqlEscape(wc.claimTicketNo),
+      sqlEscape(wc.warrantyRecordId || ''),
+      sqlEscape(wc.invoiceNumber),
+      sqlEscape(wc.productId),
+      sqlEscape(wc.productName),
+      sqlEscape(wc.serialNumber),
+      sqlEscape(wc.customerId),
+      sqlEscape(wc.customerName),
+      sqlEscape(wc.customerPhone),
+      sqlEscape(wc.issueDescription),
+      sqlEscape(wc.physicalCondition || ''),
+      sqlEscape(wc.claimDate),
+      sqlEscape(wc.expectedReturnDate || ''),
+      sqlEscape(wc.status),
+      sqlEscape(wc.claimType),
+      (wc.repairCost || 0).toString(),
+      (wc.customerCharge || 0).toString(),
+      sqlEscape(wc.replacementSerialNumber || ''),
+      sqlEscape(wc.supplierId || ''),
+      sqlEscape(wc.supplierName || ''),
+      sqlEscape(wc.technicianNotes || ''),
+      sqlEscape(wc.actionsHistory || []),
+      sqlEscape(wc.createdBy || 'Admin'),
+      sqlEscape(wc.createdAt || ''),
+    ]);
+    sql += buildChunkedInserts('warranty_claims', wcColumns, wcRows);
+  }
+
+  sql += `
+SET FOREIGN_KEY_CHECKS = 1;
+COMMIT;
+
+-- =========================================================================
+-- End of SQL Dump
+-- Developed By: Md. Tarikul Islam | Phone: 01312305225 | Sherpur, Sadar, Sherpur
+-- =========================================================================
+`;
+
+  return sql;
+}
+
+/**
+ * Generates a 100% fresh clean SQL database schema with zero transaction entries.
+ * Ready for clean deployment on MySQL, phpMyAdmin, cPanel, VPS, or Localhost.
+ */
+export function generateFreshCleanSqlDump(customStoreName = 'My Dokan ERP Store'): string {
+  const cleanState: FullAppStateForSql = {
+    companySettings: {
+      name: customStoreName,
+      nameBn: 'আমার দোকান ইআরপি',
+      slogan: 'Best Quality & Best Service',
+      phone: '+880 1700-000000',
+      email: 'info@mydokan.com',
+      website: '',
+      address: 'Dhaka, Bangladesh',
+      taxNumber: '',
+      currencySymbol: '৳',
+      currencyCode: 'BDT',
+      logoUrl: '',
+      signatureUrl: '',
+      invoiceFooter: 'Thank you for shopping with us! • আমাদের সাথে থাকার জন্য ধন্যবাদ।',
+      defaultVatPercent: 0,
+      invoicePrintType: 'A4',
+      invoiceTemplate: 'MODERN_MINIMAL',
+      invoiceColorTheme: 'INDIGO_VIOLET',
+      invoiceCustomPrimaryColor: '#4F46E5',
+      invoiceCustomAccentColor: '#06B6D4',
+      dashboardColorTheme: 'INDIGO',
+      smsSenderId: 'DOKANPRO',
+      apiEndpoint: '',
+      autoSyncEnabled: true,
+      productGenerics: [],
+      productManufacturers: [],
+      productUnits: ['Pcs', 'CTN', 'Kg', 'Ltr', 'Box', 'Pack', 'Dozen', 'Meter', 'Bag'],
+    },
+    users: [
+      {
+        id: 'usr-admin',
+        username: 'admin',
+        password: '123',
+        fullName: 'System Administrator (অ্যাডমিন)',
+        email: 'admin@mydokan.com',
+        role: 'ADMIN',
+        phone: '01700000000',
+        permissions: ['ALL'],
+        isActive: true,
+        avatar: '',
+      },
+    ],
+    categories: [],
+    products: [],
+    parties: [],
+    wallets: [
+      {
+        id: 'w-cash',
+        name: 'Main Cash Drawer',
+        nameBn: 'মূল ক্যাশ ড্রয়ার (নগদ)',
+        type: 'CASH',
+        balance: 0,
+        isActive: true,
+        colorCode: '#10B981',
+      },
+      {
+        id: 'w-bank',
+        name: 'Main Bank Account',
+        nameBn: 'ব্যাংক হিসাব',
+        type: 'BANK',
+        accountNumber: '',
+        bankName: 'Islami Bank / Dutch-Bangla Bank',
+        branch: 'Main Branch',
+        balance: 0,
+        isActive: true,
+        colorCode: '#0284C7',
+      },
+      {
+        id: 'w-mfs',
+        name: 'bKash / Nagad Wallet',
+        nameBn: 'বিকাশ / নগদ ওয়ালেট',
+        type: 'MFS',
+        accountNumber: '',
+        balance: 0,
+        isActive: true,
+        colorCode: '#E11D48',
+      },
+    ],
+    saleInvoices: [],
+    deletedSaleInvoices: [],
+    saleReturns: [],
+    quotations: [],
+    purchaseInvoices: [],
+    deletedPurchaseInvoices: [],
+    purchaseReturns: [],
+    purchaseOrders: [],
+    installmentSchemes: [],
+    expenseCategories: [
+      { id: 'exp-cat-1', name: 'Shop Rent & Service Charge', nameBn: 'দোকান ভাড়া ও সার্ভিস চার্জ', code: 'RENT', budgetMonthly: 0 },
+      { id: 'exp-cat-2', name: 'Electricity & Utility Bills', nameBn: 'বিদ্যুৎ ও অন্যান্য বিল', code: 'UTIL', budgetMonthly: 0 },
+      { id: 'exp-cat-3', name: 'Entertainment & Tea', nameBn: 'আপ্যায়ন ও চা-নাস্তা', code: 'ENTR', budgetMonthly: 0 },
+      { id: 'exp-cat-4', name: 'Packaging & Bags', nameBn: 'প্যাকেজিং ও ব্যাগ খরচ', code: 'PACK', budgetMonthly: 0 },
+    ],
+    expenseVouchers: [],
+    employees: [],
+    advanceSalaries: [],
+    payrollHistory: [],
+    dayBookEntries: [],
+    cashAdjustments: [],
+    expiredReturnLogs: [],
+    activityLogs: [],
+    smsLogs: [],
+    smsConfig: {
+      enabled: false,
+      provider: 'onnorokom',
+      apiUrl: '',
+      apiKey: '',
+      username: '',
+      password: '',
+      senderId: 'DOKANPRO',
+      httpMethod: 'GET',
+      requestFormat: 'json',
+      autoSendOnSale: true,
+      autoSendOnPaymentIn: true,
+      autoSendOnInstallmentReminder: true,
+      autoSendOnWarrantyResolved: true,
+      saleTemplate: '',
+      paymentInTemplate: '',
+      dueReminderTemplate: '',
+      warrantyResolvedTemplate: '',
+    },
+    warrantyPolicies: [],
+    warrantyRecords: [],
+    warrantyClaims: [],
+  };
+
+  return generateFullSqlDump(cleanState);
+}
+
+/**
+ * Generates a completely separate, additive, phpMyAdmin/MySQL/MariaDB/SQLite compatible SQL archive file
+ * (`admin_deleted_records.sql`) for records permanently deleted from Admin ID.
+ * Uses CREATE TABLE IF NOT EXISTS and INSERT IGNORE so importing never drops or overwrites prior records.
+ */
+export function generateAdminDeletedSqlDump(
+  records: AdminDeletedRecord[],
+  shopName?: string
+): string {
+  const timestamp = new Date().toISOString();
+  const dateStr = new Date().toLocaleDateString('en-GB');
+  const safeRecords = Array.isArray(records) ? records : [];
+
+  let sql = `-- =========================================================================
+-- DokanPro Enterprise ERP - Separate Admin Deleted Records SQL Archive
+-- File         : admin_deleted_records.sql
+-- Generated At : ${timestamp} (${dateStr})
+-- Shop Name    : ${(shopName || 'DokanPro ERP').replace(/[\r\n]+/g, ' ')}
+-- Total Saved  : ${safeRecords.length} record(s)
+-- Policy       : Records deleted from Admin ID are permanently removed from the
+--                software UI and stored exclusively in this separate SQL file.
+-- Engine       : InnoDB | Charset: UTF8MB4 (Full Bengali & Unicode Support)
+-- Compatibility: MySQL 5.7+, MySQL 8.0+, MariaDB 10.3+, phpMyAdmin, cPanel, XAMPP
+-- =========================================================================
+
+SET FOREIGN_KEY_CHECKS = 0;
+SET SQL_MODE = "NO_AUTO_VALUE_ON_ZERO";
+SET AUTOCOMMIT = 0;
+START TRANSACTION;
+SET time_zone = "+06:00";
+
+/*!40101 SET @OLD_CHARACTER_SET_CLIENT=@@CHARACTER_SET_CLIENT */;
+/*!40101 SET @OLD_CHARACTER_SET_RESULTS=@@CHARACTER_SET_RESULTS */;
+/*!40101 SET @OLD_COLLATION_CONNECTION=@@COLLATION_CONNECTION */;
+/*!40101 SET NAMES utf8mb4 */;
+
+-- --------------------------------------------------------
+-- Table structure for \`admin_deleted_records\`
+-- --------------------------------------------------------
+CREATE TABLE IF NOT EXISTS \`admin_deleted_records\` (
+  \`archive_id\` varchar(100) NOT NULL PRIMARY KEY,
+  \`entity_type\` varchar(80) NOT NULL,
+  \`source_table\` varchar(80) NOT NULL,
+  \`record_id\` varchar(120) NOT NULL,
+  \`reference_no\` varchar(150) DEFAULT NULL,
+  \`title\` varchar(255) DEFAULT NULL,
+  \`amount\` decimal(14,2) NOT NULL DEFAULT 0.00,
+  \`deleted_at\` varchar(80) NOT NULL,
+  \`deleted_at_iso\` varchar(80) NOT NULL,
+  \`deleted_by_id\` varchar(80) DEFAULT NULL,
+  \`deleted_by_username\` varchar(120) DEFAULT NULL,
+  \`deleted_by_name\` varchar(180) DEFAULT NULL,
+  \`deleted_by_role\` varchar(40) NOT NULL DEFAULT 'ADMIN',
+  \`deletion_reason\` text DEFAULT NULL,
+  \`shop_name\` varchar(255) DEFAULT NULL,
+  \`record_snapshot_json\` longtext NOT NULL,
+  \`archived_timestamp\` timestamp DEFAULT CURRENT_TIMESTAMP,
+  KEY \`idx_admin_del_entity_type\` (\`entity_type\`),
+  KEY \`idx_admin_del_record_id\` (\`record_id\`),
+  KEY \`idx_admin_del_deleted_at\` (\`deleted_at_iso\`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+`;
+
+  if (safeRecords.length > 0) {
+    const columns = [
+      'archive_id',
+      'entity_type',
+      'source_table',
+      'record_id',
+      'reference_no',
+      'title',
+      'amount',
+      'deleted_at',
+      'deleted_at_iso',
+      'deleted_by_id',
+      'deleted_by_username',
+      'deleted_by_name',
+      'deleted_by_role',
+      'deletion_reason',
+      'shop_name',
+      'record_snapshot_json',
+    ];
+
+    const rows = safeRecords.map(rec => [
+      sqlEscape(rec.archiveId || `adm-del-${Date.now()}`),
+      sqlEscape(rec.entityType || 'UNKNOWN'),
+      sqlEscape(rec.sourceTable || 'unknown'),
+      sqlEscape(rec.recordId || ''),
+      sqlEscape(rec.referenceNo || ''),
+      sqlEscape(rec.title || ''),
+      sqlEscape(Number(rec.amount || 0)),
+      sqlEscape(rec.deletedAt || ''),
+      sqlEscape(rec.deletedAtIso || new Date().toISOString()),
+      sqlEscape(rec.deletedById || ''),
+      sqlEscape(rec.deletedByUsername || 'admin'),
+      sqlEscape(rec.deletedByName || 'Admin'),
+      sqlEscape(rec.deletedByRole || 'ADMIN'),
+      sqlEscape(rec.deletionReason || ''),
+      sqlEscape(rec.shopName || shopName || ''),
+      sqlEscape(rec.recordSnapshot ?? {}),
+    ]);
+
+    const chunkSize = 50;
+    sql += `-- Archived Admin Deletions (${rows.length} record(s))\n`;
+    const colsHeader = `INSERT IGNORE INTO \`admin_deleted_records\` (\`${columns.join('`, `')}\`) VALUES\n`;
+    for (let i = 0; i < rows.length; i += chunkSize) {
+      const chunk = rows.slice(i, i + chunkSize);
+      sql += colsHeader;
+      sql += chunk.map(row => `  (${row.join(', ')})`).join(',\n') + ';\n\n';
+    }
+  } else {
+    sql += `-- No Admin deleted records archived yet.\n\n`;
+  }
+
+  sql += `SET FOREIGN_KEY_CHECKS = 1;
+COMMIT;
+
+/*!40101 SET CHARACTER_SET_CLIENT=@OLD_CHARACTER_SET_CLIENT */;
+/*!40101 SET CHARACTER_SET_RESULTS=@OLD_CHARACTER_SET_RESULTS */;
+/*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;
+`;
+
+  return sql;
+}
+
+/**
+ * Downloads a string as a .sql file in browser with explicit UTF-8 BOM encoding to ensure no character corruption
+ */
+export function downloadSqlFile(sqlContent: string, fileName?: string): void {
+  const defaultName = `dokanpro_erp_database_${new Date().toISOString().split('T')[0]}.sql`;
+  // Prefix with UTF-8 BOM (\uFEFF) to guarantee proper encoding in Windows Notepad, phpMyAdmin, and cPanel text editors
+  const blob = new Blob(['\uFEFF' + sqlContent], { type: 'application/sql;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.setAttribute('download', fileName || defaultName);
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}
+
+/**
+ * Generates ready-to-deploy PHP Backend (api.php) for cPanel, Shared Hosting, XAMPP, and Localhost
+ */
+export function generateApiPhpScript(): string {
+  const phpLines = [
+    '<?php',
+    '/**',
+    ' * DokanPro Enterprise ERP - Universal PHP & MySQL REST API Connector (Deployment-Safe v5.1)',
+    ' * Developed By: Md. Tarikul Islam',
+    ' * Phone: 01312305225',
+    ' * Address: Sherpur, Sadar, Sherpur',
+    ' *',
+    ' * Update-Safe Persistence:',
+    ' * - Reads DB credentials from ../dokanpro_erp_data/db_config.php, ./erp_storage/db_config.php, or ./db_config.php',
+    ' * - Saves live data into protected ./erp_storage/, off-webroot ../dokanpro_erp_data/, and MySQL `erp_state_store`',
+    ' * - Keeps 30-day rolling daily backups in ./erp_storage/backups/',
+    ' */',
+    '',
+    "header('Access-Control-Allow-Origin: *');",
+    "header('Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS');",
+    "header('Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With');",
+    "header('Content-Type: application/json; charset=utf-8');",
+    '',
+    "if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {",
+    '    http_response_code(200);',
+    '    exit();',
+    '}',
+    '',
+    "$storageDir = __DIR__ . '/erp_storage';",
+    "$backupsDir = $storageDir . '/backups';",
+    '$parentDir = dirname(__DIR__);',
+    "$externalStorageDir = ($parentDir && is_dir($parentDir) && is_writable($parentDir)) ? ($parentDir . '/dokanpro_erp_data') : null;",
+    '',
+    'function ensure_protected_storage_dir($dir) {',
+    '    if (!$dir) return false;',
+    '    if (!is_dir($dir)) @mkdir($dir, 0755, true);',
+    '    if (!is_dir($dir)) return false;',
+    "    if (!file_exists($dir . '/.htaccess')) {",
+    '        @file_put_contents($dir . "/.htaccess", "<IfModule mod_authz_core.c>\\n  Require all denied\\n</IfModule>\\n<IfModule !mod_authz_core.c>\\n  Deny from all\\n</IfModule>\\n");',
+    '    }',
+    "    if (!file_exists($dir . '/index.php')) {",
+    '        @file_put_contents($dir . "/index.php", "<?php http_response_code(403); exit(\'Forbidden\');\\n");',
+    '    }',
+    '    return true;',
+    '}',
+    'ensure_protected_storage_dir($storageDir);',
+    'ensure_protected_storage_dir($backupsDir);',
+    'if ($externalStorageDir) ensure_protected_storage_dir($externalStorageDir);',
+    '',
+    '// Load external db_config.php first so GitHub/cPanel code updates never erase DB credentials',
+    '$configCandidates = [];',
+    "if ($externalStorageDir) $configCandidates[] = $externalStorageDir . '/db_config.php';",
+    "$configCandidates[] = $storageDir . '/db_config.php';",
+    "$configCandidates[] = __DIR__ . '/db_config.php';",
+    'foreach ($configCandidates as $cfgFile) {',
+    '    if (file_exists($cfgFile)) { @include_once $cfgFile; break; }',
+    '}',
+    '',
+    "if (!defined('DB_HOST')) define('DB_HOST', 'localhost');",
+    "if (!defined('DB_USER')) define('DB_USER', 'renttop1_erp');",
+    "if (!defined('DB_PASS')) define('DB_PASS', 'renttop1_erp');",
+    "if (!defined('DB_NAME')) define('DB_NAME', 'renttop1_erp');",
+    '',
+    '$pdo = null;',
+    '$dbConnected = false;',
+    '$dbError = null;',
+    '',
+    'try {',
+    '    $pdo = new PDO("mysql:host=" . DB_HOST . ";dbname=" . DB_NAME . ";charset=utf8mb4", DB_USER, DB_PASS, [',
+    '        PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,',
+    '        PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,',
+    '        PDO::ATTR_EMULATE_PREPARES => true,',
+    '    ]);',
+    '    $dbConnected = true;',
+    '    $pdo->exec("CREATE TABLE IF NOT EXISTS `erp_state_store` (`store_key` varchar(64) NOT NULL PRIMARY KEY, `state_json` longtext NOT NULL, `last_updated_epoch` bigint(20) NOT NULL DEFAULT 0, `updated_at` timestamp DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");',
+    '} catch (PDOException $e) {',
+    '    $dbConnected = false;',
+    '    $dbError = $e->getMessage();',
+    '}',
+    '',
+    'function load_best_snapshot($pdo, $storageDir, $externalStorageDir, $rootDir) {',
+    '    $candidates = [];',
+    '    if ($pdo) {',
+    '        try {',
+    '            $stmt = $pdo->prepare("SELECT state_json, last_updated_epoch FROM `erp_state_store` WHERE `store_key` = \'main\' LIMIT 1");',
+    '            $stmt->execute();',
+    '            $row = $stmt->fetch();',
+    "            if ($row && !empty($row['state_json'])) {",
+    "                $d = @json_decode($row['state_json'], true);",
+    "                if (is_array($d)) $candidates[] = ['source' => 'mysql', 'data' => $d, 'epoch' => (int)($d['lastUpdatedEpoch'] ?? $row['last_updated_epoch'] ?? 0)];",
+    '            }',
+    '        } catch (Exception $e) {}',
+    '    }',
+    "    $paths = array_filter([$externalStorageDir ? $externalStorageDir . '/erp_data_snapshot.json' : null, $storageDir . '/erp_data_snapshot.json', $rootDir . '/erp_data_snapshot.json', $rootDir . '/erp_local_backup.json']);",
+    '    foreach ($paths as $p) {',
+    '        if (file_exists($p)) {',
+    '            $d = @json_decode(@file_get_contents($p), true);',
+    "            if (is_array($d)) $candidates[] = ['source' => basename($p), 'data' => $d, 'epoch' => (int)($d['lastUpdatedEpoch'] ?? 0)];",
+    '        }',
+    '    }',
+    '    if (empty($candidates)) return null;',
+    "    usort($candidates, function($a, $b) { return $b['epoch'] <=> $a['epoch']; });",
+    "    return $candidates[0]['data'];",
+    '}',
+    '',
+    "$action = isset($_GET['action']) ? $_GET['action'] : 'health';",
+    '',
+    'switch ($action) {',
+    "    case 'health':",
+    '        echo json_encode([',
+    "            'status' => 'online',",
+    "            'app' => 'DokanPro Enterprise ERP API',",
+    "            'version' => '5.1.0',",
+    "            'developer' => 'Md. Tarikul Islam (Phone: 01312305225, Sherpur, Sadar, Sherpur)',",
+    "            'db_connected' => $dbConnected,",
+    "            'db_error' => $dbError,",
+    "            'storage_protected' => is_dir($storageDir) && is_writable($storageDir),",
+    "            'server_time' => date('Y-m-d H:i:s')",
+    '        ], JSON_UNESCAPED_UNICODE);',
+    '        break;',
+    '',
+    "    case 'sync_all':",
+    "        if ($_SERVER['REQUEST_METHOD'] === 'POST') {",
+    "            $rawInput = file_get_contents('php://input');",
+    '            $input = json_decode($rawInput, true);',
+    '            if (!$input || !is_array($input)) {',
+    "                echo json_encode(['success' => false, 'message' => 'Invalid JSON payload received'], JSON_UNESCAPED_UNICODE);",
+    '                exit();',
+    '            }',
+    "            $isResetWipe = !empty($input['is_reset_wipe']) || !empty($input['data']['is_reset_wipe']);",
+    '            $existing = !$isResetWipe ? load_best_snapshot($pdo, $storageDir, $externalStorageDir, __DIR__) : null;',
+    "            if (!$isResetWipe && is_array($existing) && isset($input['products']) && empty($input['products']) && !empty($existing['products']) && empty($input['deletedProductIds'])) {",
+    "                $input['products'] = $existing['products'];",
+    '            }',
+    '            $jsonStr = json_encode($input, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);',
+    "            @file_put_contents($storageDir . '/erp_data_snapshot.json', $jsonStr, LOCK_EX);",
+    "            @file_put_contents($backupsDir . '/snapshot_' . date('Y-m-d') . '.json', $jsonStr, LOCK_EX);",
+    "            if ($externalStorageDir) @file_put_contents($externalStorageDir . '/erp_data_snapshot.json', $jsonStr, LOCK_EX);",
+    "            @file_put_contents(__DIR__ . '/erp_data_snapshot.json', $jsonStr, LOCK_EX);",
+    '            if ($pdo) {',
+    '                try {',
+    '                    $stmt = $pdo->prepare("INSERT INTO `erp_state_store` (`store_key`, `state_json`, `last_updated_epoch`) VALUES (\'main\', :s, :e) ON DUPLICATE KEY UPDATE `state_json` = VALUES(`state_json`), `last_updated_epoch` = VALUES(`last_updated_epoch`)");',
+    "                    $stmt->execute([':s' => $jsonStr, ':e' => (int)($input['lastUpdatedEpoch'] ?? (time() * 1000))]);",
+    '                } catch (Exception $e) {}',
+    '            }',
+    '            echo json_encode([',
+    "                'success' => true,",
+    "                'message' => 'All ERP data synced to protected storage and MySQL.',",
+    "                'db_synced' => $dbConnected,",
+    "                'updated_at' => date('Y-m-d H:i:s')",
+    '            ], JSON_UNESCAPED_UNICODE);',
+    '        } else {',
+    '            $best = load_best_snapshot($pdo, $storageDir, $externalStorageDir, __DIR__);',
+    '            if ($best) {',
+    '                echo json_encode(array_merge($best, [\'success\' => true, \'data\' => $best]), JSON_UNESCAPED_UNICODE);',
+    '            } else {',
+    "                echo json_encode(['success' => true, 'data' => null, 'empty' => true], JSON_UNESCAPED_UNICODE);",
+    '            }',
+    '        }',
+    '        break;',
+    '',
+    "    case 'archive_admin_deleted':",
+    "        if ($_SERVER['REQUEST_METHOD'] === 'POST') {",
+    "            $rawInput = file_get_contents('php://input');",
+    '            $input = json_decode($rawInput, true);',
+    '            $incoming = [];',
+    "            if (isset($input['records']) && is_array($input['records'])) {",
+    "                $incoming = $input['records'];",
+    "            } elseif (isset($input['record']) && is_array($input['record'])) {",
+    "                $incoming = [$input['record']];",
+    '            }',
+    '            $validRecords = array_values(array_filter($incoming, function($r) {',
+    "                return is_array($r) && !empty($r['archiveId']) && strtoupper((string)($r['deletedByRole'] ?? '')) === 'ADMIN';",
+    '            }));',
+    '            if (empty($validRecords)) {',
+    '                http_response_code(403);',
+    "                echo json_encode(['success' => false, 'message' => 'Admin authorization required'], JSON_UNESCAPED_UNICODE);",
+    '                exit();',
+    '            }',
+    "            $archiveJsonPath = $storageDir . '/admin_deleted_archive.json';",
+    '            $existingArchive = file_exists($archiveJsonPath) ? (json_decode(@file_get_contents($archiveJsonPath), true) ?: []) : [];',
+    '            $byId = [];',
+    "            foreach ($existingArchive as $item) { if (isset($item['archiveId'])) $byId[$item['archiveId']] = $item; }",
+    "            foreach ($validRecords as $item) { $byId[$item['archiveId']] = $item; }",
+    '            $mergedArchive = array_values($byId);',
+    '            $archiveJsonStr = json_encode($mergedArchive, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);',
+    '            @file_put_contents($archiveJsonPath, $archiveJsonStr, LOCK_EX);',
+    "            if ($externalStorageDir) @file_put_contents($externalStorageDir . '/admin_deleted_archive.json', $archiveJsonStr, LOCK_EX);",
+    '            $escSql = function($v) {',
+    "                if ($v === null) return 'NULL';",
+    '                if (is_numeric($v) && !is_string($v)) return $v;',
+    '                return "\'" . str_replace(["\\\\", "\'", "\\r", "\\n", "\\0"], ["\\\\\\\\", "\\\\\'", "\\\\r", "\\\\n", "\\\\0"], (string)$v) . "\'";',
+    '            };',
+    '            $sql = "-- DokanPro ERP Separate Admin Deleted Records SQL Archive\\nSET NAMES utf8mb4;\\n";',
+    '            $sql .= "CREATE TABLE IF NOT EXISTS `admin_deleted_records` (`archive_id` varchar(100) NOT NULL PRIMARY KEY, `entity_type` varchar(80) NOT NULL, `source_table` varchar(80) NOT NULL, `record_id` varchar(120) NOT NULL, `reference_no` varchar(150) DEFAULT NULL, `title` varchar(255) DEFAULT NULL, `amount` decimal(14,2) NOT NULL DEFAULT 0.00, `deleted_at` varchar(80) NOT NULL, `deleted_at_iso` varchar(80) NOT NULL, `deleted_by_id` varchar(80) DEFAULT NULL, `deleted_by_username` varchar(120) DEFAULT NULL, `deleted_by_name` varchar(180) DEFAULT NULL, `deleted_by_role` varchar(40) NOT NULL DEFAULT \'ADMIN\', `deletion_reason` text DEFAULT NULL, `shop_name` varchar(255) DEFAULT NULL, `record_snapshot_json` longtext NOT NULL, `archived_timestamp` timestamp DEFAULT CURRENT_TIMESTAMP) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;\\n\\n";',
+    '            foreach ($mergedArchive as $r) {',
+    "                $snap = json_encode($r['recordSnapshot'] ?? [], JSON_UNESCAPED_UNICODE);",
+    '                $sql .= "INSERT IGNORE INTO `admin_deleted_records` (`archive_id`, `entity_type`, `source_table`, `record_id`, `reference_no`, `title`, `amount`, `deleted_at`, `deleted_at_iso`, `deleted_by_id`, `deleted_by_username`, `deleted_by_name`, `deleted_by_role`, `deletion_reason`, `shop_name`, `record_snapshot_json`) VALUES (" . $escSql($r[\'archiveId\'] ?? \'\') . ", " . $escSql($r[\'entityType\'] ?? \'\') . ", " . $escSql($r[\'sourceTable\'] ?? \'\') . ", " . $escSql($r[\'recordId\'] ?? \'\') . ", " . $escSql($r[\'referenceNo\'] ?? \'\') . ", " . $escSql($r[\'title\'] ?? \'\') . ", " . (float)($r[\'amount\'] ?? 0) . ", " . $escSql($r[\'deletedAt\'] ?? \'\') . ", " . $escSql($r[\'deletedAtIso\'] ?? \'\') . ", " . $escSql($r[\'deletedById\'] ?? \'\') . ", " . $escSql($r[\'deletedByUsername\'] ?? \'admin\') . ", " . $escSql($r[\'deletedByName\'] ?? \'Admin\') . ", \'ADMIN\', " . $escSql($r[\'deletionReason\'] ?? \'\') . ", " . $escSql($r[\'shopName\'] ?? \'\') . ", " . $escSql($snap) . ");\\n";',
+    '            }',
+    "            @file_put_contents($storageDir . '/admin_deleted_records.sql', $sql, LOCK_EX);",
+    "            if ($externalStorageDir) @file_put_contents($externalStorageDir . '/admin_deleted_records.sql', $sql, LOCK_EX);",
+    "            @file_put_contents(__DIR__ . '/admin_deleted_records.sql', $sql, LOCK_EX);",
+    '            echo json_encode([\'success\' => true, \'archivedCount\' => count($mergedArchive), \'fileName\' => \'admin_deleted_records.sql\'], JSON_UNESCAPED_UNICODE);',
+    '        }',
+    '        break;',
+    '',
+    "    case 'download_admin_deleted_sql':",
+    "        $cands = [$storageDir . '/admin_deleted_records.sql', $externalStorageDir ? ($externalStorageDir . '/admin_deleted_records.sql') : null, __DIR__ . '/admin_deleted_records.sql'];",
+    '        foreach ($cands as $c) {',
+    '            if ($c && file_exists($c)) {',
+    "                header('Content-Type: application/sql; charset=utf-8');",
+    "                header('Content-Disposition: attachment; filename=\"admin_deleted_records.sql\"');",
+    '                readfile($c);',
+    '                exit();',
+    '            }',
+    '        }',
+    "        header('Content-Type: application/sql; charset=utf-8');",
+    "        header('Content-Disposition: attachment; filename=\"admin_deleted_records.sql\"');",
+    '        echo "-- DokanPro ERP Separate Admin Deleted Records SQL Archive (No records yet)\\n";',
+    '        exit();',
+    '',
+    '    default:',
+    '        http_response_code(404);',
+    "        echo json_encode(['success' => false, 'message' => 'Action not found'], JSON_UNESCAPED_UNICODE);",
+    '        break;',
+    '}',
+    '?>'
+  ];
+
+  return phpLines.join('\n');
+}

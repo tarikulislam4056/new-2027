@@ -1,0 +1,241 @@
+name: Deploy to cPanel via FTP (Data-Safe)
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  web-deploy:
+    name: Build & Upload Code to cPanel FTP (Preserve Live Data)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 🚚 Get latest code
+        uses: actions/checkout@v4
+
+      - name: ⚙️ Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 📦 Install dependencies & Build (Code Only)
+        run: |
+          npm install
+          npm run build
+          cp api.php dist/ 2>/dev/null || true
+          cp public/.htaccess dist/ 2>/dev/null || true
+          cp db_config.example.php dist/ 2>/dev/null || true
+          rm -rf dist/assets/aistudio
+          rm -f dist/erp_data_snapshot.json dist/erp_local_backup.json dist/database.sql dist/fresh_database.sql dist/db_config.php dist/.cpanel.yml
+
+      - name: 🔍 Validate FTP & Auto-Detect Target Directory
+        id: ftp_cfg
+        env:
+          FTP_SERVER: ${{ secrets.FTP_SERVER }}
+          FTP_USERNAME: ${{ secrets.FTP_USERNAME }}
+          FTP_PASSWORD: ${{ secrets.FTP_PASSWORD }}
+          FTP_DIR: ${{ secrets.FTP_DIR }}
+          FTP_PORT: ${{ secrets.FTP_PORT || '21' }}
+        run: |
+          CLEAN_SERVER="$(printf '%s' "$FTP_SERVER" | tr -d '\r\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's|^ftps\?://||' -e 's|/.*$||')"
+          CLEAN_USER="$(printf '%s' "$FTP_USERNAME" | tr -d '\r\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+          CLEAN_DIR="$(printf '%s' "$FTP_DIR" | tr -d '\r\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+          CLEAN_PORT="$(printf '%s' "${FTP_PORT:-21}" | tr -d '\r\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+
+          if [ -z "$CLEAN_SERVER" ] || [ -z "$CLEAN_USER" ] || [ -z "$FTP_PASSWORD" ]; then
+            echo "⚠️ FTP Secrets are not configured in this repository (${{ github.repository }}):"
+            [ -z "$CLEAN_SERVER" ] && echo "  - Missing: FTP_SERVER"
+            [ -z "$CLEAN_USER" ] && echo "  - Missing: FTP_USERNAME"
+            [ -z "$FTP_PASSWORD" ] && echo "  - Missing: FTP_PASSWORD"
+            if [ "${{ github.repository }}" != "tarikulislam4056/Pharmecy" ]; then
+              echo "ℹ️ Skipping FTP deploy on mirror repository."
+              echo "should_deploy=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "❌ Please set FTP_SERVER, FTP_USERNAME, and FTP_PASSWORD in GitHub Secrets."
+            exit 1
+          fi
+
+          echo "::add-mask::${CLEAN_SERVER}"
+          echo "::add-mask::${CLEAN_USER}"
+          echo "should_deploy=true" >> "$GITHUB_OUTPUT"
+          echo "server=${CLEAN_SERVER}" >> "$GITHUB_OUTPUT"
+          echo "username=${CLEAN_USER}" >> "$GITHUB_OUTPUT"
+          echo "port=${CLEAN_PORT:-21}" >> "$GITHUB_OUTPUT"
+
+          export CLEAN_SERVER CLEAN_USER CLEAN_DIR CLEAN_PORT
+          python3 - <<'PYEOF'
+          import ftplib
+          import os
+          import ssl
+          import sys
+
+          server = os.environ.get("CLEAN_SERVER", "").strip()
+          user = os.environ.get("CLEAN_USER", "").strip()
+          password = os.environ.get("FTP_PASSWORD", "")
+          port = int(os.environ.get("CLEAN_PORT", "21") or "21")
+          raw_dir = os.environ.get("CLEAN_DIR", "").strip()
+          github_output = os.environ["GITHUB_OUTPUT"]
+
+          def connect_ftp():
+              try:
+                  ctx = ssl.create_default_context()
+                  ctx.check_hostname = False
+                  ctx.verify_mode = ssl.CERT_NONE
+                  ftps = ftplib.FTP_TLS(context=ctx)
+                  ftps.connect(server, port, timeout=30)
+                  ftps.login(user, password)
+                  ftps.prot_p()
+                  return ftps, "ftps"
+              except Exception as e_ftps:
+                  print(f"ℹ️ Explicit FTPS probe note: {e_ftps}. Trying plain FTP...")
+
+              try:
+                  ftp = ftplib.FTP()
+                  ftp.connect(server, port, timeout=30)
+                  ftp.login(user, password)
+                  return ftp, "ftp"
+              except Exception as e_ftp:
+                  print(f"❌ FTP connection/login failed: {e_ftp}", file=sys.stderr)
+                  sys.exit(1)
+
+          def dir_exists(ftp, path):
+              orig = ftp.pwd()
+              try:
+                  ftp.cwd(path)
+                  ftp.cwd(orig)
+                  return True
+              except Exception:
+                  try:
+                      ftp.cwd(orig)
+                  except Exception:
+                      pass
+                  return False
+
+          def ensure_dir(ftp, rel_path):
+              parts = [p for p in rel_path.replace("\\", "/").split("/") if p and p != "."]
+              if not parts:
+                  return
+              orig = ftp.pwd()
+              for part in parts:
+                  try:
+                      ftp.cwd(part)
+                  except Exception:
+                      ftp.mkd(part)
+                      ftp.cwd(part)
+              ftp.cwd(orig)
+
+          ftp, detected_protocol = connect_ftp()
+          root_pwd = ftp.pwd()
+          print(f"✅ Connected via {detected_protocol.upper()} (port {port}). FTP root pwd: {root_pwd}")
+
+          has_public_html = dir_exists(ftp, "public_html")
+          cleaned = "/".join(p for p in raw_dir.replace("\\", "/").split("/") if p and p != ".")
+
+          if not cleaned:
+              if has_public_html:
+                  target_rel = "public_html"
+                  print("ℹ️ Detected 'public_html' folder in FTP root -> using ./public_html/")
+              else:
+                  target_rel = ""
+                  print("ℹ️ FTP account is already chrooted to web root (no 'public_html' subfolder) -> using ./")
+          elif dir_exists(ftp, cleaned):
+              target_rel = cleaned
+              print(f"ℹ️ Verified existing FTP_DIR -> ./{target_rel}/")
+          elif (cleaned == "public_html" or cleaned.startswith("public_html/")) and not has_public_html:
+              stripped = cleaned[len("public_html"):].strip("/")
+              target_rel = stripped
+              if target_rel:
+                  ensure_dir(ftp, target_rel)
+                  print(f"ℹ️ FTP account is chrooted inside public_html; mapped '{raw_dir}' -> ./{target_rel}/")
+              else:
+                  print(f"ℹ️ FTP account is chrooted inside public_html; mapped '{raw_dir}' -> ./")
+          else:
+              ensure_dir(ftp, cleaned)
+              target_rel = cleaned
+              print(f"ℹ️ Created missing target directory -> ./{target_rel}/")
+
+          if os.path.isdir("dist"):
+              for current_root, dirs, _ in os.walk("dist"):
+                  for d in dirs:
+                      rel_sub = os.path.relpath(os.path.join(current_root, d), "dist").replace("\\", "/")
+                      full_sub = f"{target_rel}/{rel_sub}" if target_rel else rel_sub
+                      ensure_dir(ftp, full_sub)
+              print("✅ Verified/prepared all remote subdirectories matching ./dist/")
+
+          try:
+              ftp.quit()
+          except Exception:
+              pass
+
+          server_dir = f"./{target_rel}/" if target_rel else "./"
+          with open(github_output, "a", encoding="utf-8") as fh:
+              fh.write(f"server_dir={server_dir}\n")
+              fh.write(f"protocol={detected_protocol}\n")
+          print(f"✅ Final deploy target: server-dir={server_dir}, protocol={detected_protocol}")
+          PYEOF
+
+      - name: 🚀 Deploy to cPanel via FTP/FTPS
+        id: deploy_primary
+        if: steps.ftp_cfg.outputs.should_deploy == 'true'
+        continue-on-error: true
+        uses: SamKirkland/FTP-Deploy-Action@v4.3.5
+        with:
+          server: ${{ steps.ftp_cfg.outputs.server }}
+          username: ${{ steps.ftp_cfg.outputs.username }}
+          password: ${{ secrets.FTP_PASSWORD }}
+          port: ${{ steps.ftp_cfg.outputs.port }}
+          protocol: ${{ steps.ftp_cfg.outputs.protocol }}
+          security: loose
+          local-dir: ./dist/
+          server-dir: ${{ steps.ftp_cfg.outputs.server_dir }}
+          dangerous-clean-slate: false
+          exclude: |
+            **/.git*
+            **/.git*/**
+            **/node_modules/**
+            **/assets/aistudio/**
+            **/erp_data_snapshot.json
+            **/erp_local_backup.json
+            **/database.sql
+            **/fresh_database.sql
+            **/db_config.php
+            **/.cpanel.yml
+            erp_storage/**
+            dokanpro_erp_data/**
+            backups/**
+
+      - name: 🔁 Fallback Deploy to cPanel via Standard FTP
+        id: deploy_fallback
+        if: steps.ftp_cfg.outputs.should_deploy == 'true' && steps.deploy_primary.outcome == 'failure' && steps.ftp_cfg.outputs.protocol == 'ftps'
+        uses: SamKirkland/FTP-Deploy-Action@v4.3.5
+        with:
+          server: ${{ steps.ftp_cfg.outputs.server }}
+          username: ${{ steps.ftp_cfg.outputs.username }}
+          password: ${{ secrets.FTP_PASSWORD }}
+          port: ${{ steps.ftp_cfg.outputs.port }}
+          protocol: ftp
+          local-dir: ./dist/
+          server-dir: ${{ steps.ftp_cfg.outputs.server_dir }}
+          dangerous-clean-slate: false
+          exclude: |
+            **/.git*
+            **/.git*/**
+            **/node_modules/**
+            **/assets/aistudio/**
+            **/erp_data_snapshot.json
+            **/erp_local_backup.json
+            **/database.sql
+            **/fresh_database.sql
+            **/db_config.php
+            **/.cpanel.yml
+            erp_storage/**
+            dokanpro_erp_data/**
+            backups/**
+
+      - name: ✅ Verify Deploy Result
+        if: steps.ftp_cfg.outputs.should_deploy == 'true' && steps.deploy_primary.outcome == 'failure' && steps.deploy_fallback.outcome != 'success'
+        run: |
+          echo "❌ FTP deployment failed. Check the step logs above for details."
+          exit 1

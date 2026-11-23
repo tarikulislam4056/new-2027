@@ -1,0 +1,17 @@
+---
+deployment:
+  tasks:
+    - export DEPLOYPATH=$HOME/public_html
+    - /bin/mkdir -p $DEPLOYPATH/erp_storage/backups
+    - if [ -f "$DEPLOYPATH/erp_data_snapshot.json" ] && [ ! -f "$DEPLOYPATH/erp_storage/erp_data_snapshot.json" ]; then /bin/cp "$DEPLOYPATH/erp_data_snapshot.json" "$DEPLOYPATH/erp_storage/erp_data_snapshot.json"; fi
+    - if [ -f "$DEPLOYPATH/database.sql" ] && [ ! -f "$DEPLOYPATH/erp_storage/database.sql" ]; then /bin/cp "$DEPLOYPATH/database.sql" "$DEPLOYPATH/erp_storage/database.sql"; fi
+    - if [ -f "$DEPLOYPATH/admin_deleted_records.sql" ] && [ ! -f "$DEPLOYPATH/erp_storage/admin_deleted_records.sql" ]; then /bin/cp "$DEPLOYPATH/admin_deleted_records.sql" "$DEPLOYPATH/erp_storage/admin_deleted_records.sql"; fi
+    - if [ -f "$DEPLOYPATH/erp_storage/erp_data_snapshot.json" ]; then /bin/cp "$DEPLOYPATH/erp_storage/erp_data_snapshot.json" "$DEPLOYPATH/erp_storage/backups/pre_deploy_$(date +%Y%m%d_%H%M%S).json"; fi
+    - if [ -f "$DEPLOYPATH/api.php" ] && [ ! -f "$DEPLOYPATH/erp_storage/db_config.php" ] && [ ! -f "$DEPLOYPATH/db_config.php" ]; then php -r '$c=@file_get_contents("'$DEPLOYPATH'/api.php"); if($c && preg_match_all("/define\s*\(\s*[\x27\"](DB_HOST|DB_USER|DB_PASS|DB_NAME)[\x27\"]\s*,\s*[\x27\"]([^\x27\"]*)[\x27\"]\s*\)\s*;/", $c, $m, PREG_SET_ORDER)){ $out="<?php\n"; foreach($m as $x){ $out.="define(\x27".$x[1]."\x27, \x27".addslashes($x[2])."\x27);\n"; } @file_put_contents("'$DEPLOYPATH'/erp_storage/db_config.php", $out); }' 2>/dev/null || true; fi
+    - if [ -d "dist" ]; then /bin/cp -R dist/assets $DEPLOYPATH/ 2>/dev/null || true; /bin/cp dist/index.html $DEPLOYPATH/index.html 2>/dev/null || true; /bin/cp dist/favicon.svg $DEPLOYPATH/favicon.svg 2>/dev/null || true; /bin/cp dist/manifest.json $DEPLOYPATH/manifest.json 2>/dev/null || true; fi
+    - if [ ! -d "dist" ]; then /bin/cp -R assets $DEPLOYPATH/ 2>/dev/null || true; /bin/cp index.html $DEPLOYPATH/index.html 2>/dev/null || true; /bin/cp public/favicon.svg $DEPLOYPATH/favicon.svg 2>/dev/null || true; /bin/cp public/manifest.json $DEPLOYPATH/manifest.json 2>/dev/null || true; fi
+    - /bin/cp public/.htaccess $DEPLOYPATH/.htaccess 2>/dev/null || true
+    - /bin/cp api.php $DEPLOYPATH/api.php 2>/dev/null || true
+    - /bin/cp db_config.example.php $DEPLOYPATH/db_config.example.php 2>/dev/null || true
+    - if [ ! -f "$DEPLOYPATH/erp_storage/erp_data_snapshot.json" ] && [ ! -f "$DEPLOYPATH/erp_data_snapshot.json" ] && [ -f "erp_data_snapshot.json" ]; then /bin/cp erp_data_snapshot.json "$DEPLOYPATH/erp_storage/erp_data_snapshot.json"; fi
+    - if [ ! -f "$DEPLOYPATH/erp_storage/database.sql" ] && [ ! -f "$DEPLOYPATH/database.sql" ] && [ -f "database.sql" ]; then /bin/cp database.sql "$DEPLOYPATH/database.sql"; fi

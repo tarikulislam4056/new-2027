@@ -1,0 +1,2259 @@
+import React, { useState, useMemo, useEffect } from 'react';
+import { useApp } from '../../context/AppContext';
+import { useTranslation } from '../../i18n/translations';
+import { Product } from '../../types';
+import { ReplaceProductModal } from './ReplaceProductModal';
+import { ProductImportModal } from './ProductImportModal';
+import { BatchManagementModal } from './BatchManagementModal';
+import { BatchInventoryView } from './BatchInventoryView';
+import { DatePeriodFilter } from '../common/DatePeriodFilter';
+import { CameraBarcodeScannerModal } from '../common/CameraBarcodeScannerModal';
+import { MultiUserAuditTrail } from '../common/MultiUserAuditTrail';
+import { canUserDelete, canUserEdit, canUserExportProductCsv } from '../../utils/permissions';
+import { getProductExpirySummary, normalizeDateToISO } from '../../utils/dateUtils';
+import { formatStockWithUnit, hasDualUnit, formatCartonBreakdown, formatCleanNumber } from '../../utils/unitConversion';
+import {
+  getUnifiedCategoryOptions,
+  matchesCategoryFilter,
+  resolveProductCategoryName,
+  getCategoryLabelByValue,
+} from '../../utils/categoryFilter';
+import {
+  Package,
+  Search,
+  Plus,
+  Barcode,
+  Edit2,
+  Trash2,
+  Printer,
+  Download,
+  AlertTriangle,
+  Tag,
+  RefreshCw,
+  Upload,
+  Calendar,
+  Filter,
+  RotateCcw,
+  Boxes,
+  Layers,
+  Building2,
+  FileText,
+  Clock,
+  ArrowUpDown,
+  Camera,
+  MapPin,
+  Check,
+  X,
+  LayoutGrid,
+  List,
+  ShieldCheck,
+} from 'lucide-react';
+
+interface ProductsListViewProps {
+  onOpenAddModal: () => void;
+  onOpenEditModal: (product: Product) => void;
+}
+
+export const ProductsListView: React.FC<ProductsListViewProps> = ({
+  onOpenAddModal,
+  onOpenEditModal,
+}) => {
+  const {
+    language,
+    products,
+    categories,
+    formatCurrency,
+    deleteProduct,
+    updateProduct,
+    deleteAllProducts,
+    expiredReturnLogs,
+    deleteExpiredReturnLog,
+    openPrintModal,
+    showToast,
+    companySettings,
+    currentUser,
+    users,
+  } = useApp();
+  const { t } = useTranslation(language);
+
+  const isPharmacyMode = companySettings?.businessModule === 'pharmacy';
+
+  const unifiedCategories = useMemo(
+    () => getUnifiedCategoryOptions(categories, products),
+    [categories, products]
+  );
+
+  // Active View Tab
+  const [activeTab, setActiveTab] = useState<'all' | 'batch-inventory' | 'expiry' | 'low-stock' | 'return-logs' | 'write-off-logs' | 'replace-logs'>('all');
+  const [expirySubFilter, setExpirySubFilter] = useState<'expired' | 'expiring-soon' | 'fresh' | 'all-dated'>('expired');
+  const [expiryViewMode, setExpiryViewMode] = useState<'columns' | 'table'>('table');
+  const [quickDateProduct, setQuickDateProduct] = useState<Product | null>(null);
+  const [quickDateValue, setQuickDateValue] = useState<string>('');
+
+  // Search and Multi-Dimension Filters
+  const [search, setSearch] = useState('');
+  const [selectedCategory, setSelectedCategory] = useState<string>('ALL');
+  const [selectedGeneric, setSelectedGeneric] = useState<string>('ALL');
+  const [selectedManufacturer, setSelectedManufacturer] = useState<string>('ALL');
+
+  useEffect(() => {
+    if (!isPharmacyMode && selectedGeneric !== 'ALL') {
+      setSelectedGeneric('ALL');
+    }
+  }, [isPharmacyMode, selectedGeneric]);
+  const [stockStatusFilter, setStockStatusFilter] = useState<'ALL' | 'IN_STOCK' | 'OUT_OF_STOCK' | 'LOW_STOCK'>('ALL');
+
+  // Date Filters
+  const [startDate, setStartDate] = useState<string>('');
+  const [endDate, setEndDate] = useState<string>('');
+  const [periodLabel, setPeriodLabel] = useState<string>('');
+  const [dateFilterTarget, setDateFilterTarget] = useState<'createdAt' | 'expDate'>('createdAt');
+
+  // Barcode Label Generation Modal State
+  const [barcodeProduct, setBarcodeProduct] = useState<Product | null>(null);
+  const [barcodeCount, setBarcodeCount] = useState<number>(12);
+  const [replaceProduct, setReplaceProduct] = useState<Product | null>(null);
+  const [batchProduct, setBatchProduct] = useState<Product | null>(null);
+  const [showImportModal, setShowImportModal] = useState<boolean>(false);
+  const [isCameraScannerOpen, setIsCameraScannerOpen] = useState<boolean>(false);
+  const [itemsPerPage, setItemsPerPage] = useState<number | 'ALL'>('ALL');
+  const [currentPage, setCurrentPage] = useState<number>(1);
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [search, selectedCategory, selectedGeneric, selectedManufacturer, stockStatusFilter, startDate, endDate, activeTab, expirySubFilter, dateFilterTarget]);
+
+
+
+  // Date & Expiry Status Logic (Aware of both product expDate and sub-batches)
+  const productExpirySummaries = useMemo(() => {
+    const map = new Map<string, ReturnType<typeof getProductExpirySummary>>();
+    products.forEach(p => {
+      map.set(p.id, getProductExpirySummary(p, 30));
+    });
+    return map;
+  }, [products]);
+
+  // Expiry & Stock Counts
+  const expiredCount = useMemo(() => {
+    return products.filter(p => {
+      const summary = productExpirySummaries.get(p.id);
+      return Boolean(summary?.hasExpired);
+    }).length;
+  }, [products, productExpirySummaries]);
+
+  const expiringSoonCount = useMemo(() => {
+    return products.filter(p => {
+      const summary = productExpirySummaries.get(p.id);
+      return Boolean(summary?.hasExpiringSoon);
+    }).length;
+  }, [products, productExpirySummaries]);
+
+  const totalDatedCount = useMemo(() => {
+    return products.filter(p => {
+      const summary = productExpirySummaries.get(p.id);
+      return Boolean(summary?.hasAnyExpiry);
+    }).length;
+  }, [products, productExpirySummaries]);
+
+  const freshDatedCount = useMemo(() => {
+    return products.filter(p => {
+      const summary = productExpirySummaries.get(p.id);
+      return Boolean(summary?.hasFresh);
+    }).length;
+  }, [products, productExpirySummaries]);
+
+  // Products partitioned for the 3-Column Kanban Board
+  const expiredProducts = useMemo(() => {
+    return products.filter(p => {
+      const summary = productExpirySummaries.get(p.id);
+      return Boolean(summary?.hasExpired);
+    });
+  }, [products, productExpirySummaries]);
+
+  const expiringSoonProducts = useMemo(() => {
+    return products.filter(p => {
+      const summary = productExpirySummaries.get(p.id);
+      return Boolean(summary?.hasExpiringSoon);
+    });
+  }, [products, productExpirySummaries]);
+
+  const freshDatedProducts = useMemo(() => {
+    return products.filter(p => {
+      const summary = productExpirySummaries.get(p.id);
+      return Boolean(summary?.hasFresh);
+    });
+  }, [products, productExpirySummaries]);
+
+  const filteredExpiredProducts = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return expiredProducts.filter(p => {
+      if (!matchesCategoryFilter(p, selectedCategory, categories)) return false;
+      if (!q) return true;
+      return (
+        (p.name || '').toLowerCase().includes(q) ||
+        (p.nameBn || '').toLowerCase().includes(q) ||
+        (p.sku || '').toLowerCase().includes(q) ||
+        (p.barcode || '').toLowerCase().includes(q) ||
+        (isPharmacyMode && (p.generic || '').toLowerCase().includes(q)) ||
+        (p.batchNumber || '').toLowerCase().includes(q)
+      );
+    });
+  }, [expiredProducts, categories, search, selectedCategory, isPharmacyMode]);
+
+  const filteredExpiringSoonProducts = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return expiringSoonProducts.filter(p => {
+      if (!matchesCategoryFilter(p, selectedCategory, categories)) return false;
+      if (!q) return true;
+      return (
+        (p.name || '').toLowerCase().includes(q) ||
+        (p.nameBn || '').toLowerCase().includes(q) ||
+        (p.sku || '').toLowerCase().includes(q) ||
+        (p.barcode || '').toLowerCase().includes(q) ||
+        (isPharmacyMode && (p.generic || '').toLowerCase().includes(q)) ||
+        (p.batchNumber || '').toLowerCase().includes(q)
+      );
+    });
+  }, [expiringSoonProducts, categories, search, selectedCategory, isPharmacyMode]);
+
+  const filteredFreshDatedProducts = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return freshDatedProducts.filter(p => {
+      if (!matchesCategoryFilter(p, selectedCategory, categories)) return false;
+      if (!q) return true;
+      return (
+        (p.name || '').toLowerCase().includes(q) ||
+        (p.nameBn || '').toLowerCase().includes(q) ||
+        (p.sku || '').toLowerCase().includes(q) ||
+        (p.barcode || '').toLowerCase().includes(q) ||
+        (isPharmacyMode && (p.generic || '').toLowerCase().includes(q)) ||
+        (p.batchNumber || '').toLowerCase().includes(q)
+      );
+    });
+  }, [freshDatedProducts, categories, search, selectedCategory, isPharmacyMode]);
+  const lowStockCount = useMemo(
+    () => products.filter(p => Number(p.stock || 0) <= Number(p.reorderLevel ?? 0)).length,
+    [products]
+  );
+  const supplierReturnsCount = useMemo(() => (expiredReturnLogs || []).filter(l => l.actionType === 'RETURN_SUPPLIER').length, [expiredReturnLogs]);
+  const writeOffsCount = useMemo(() => (expiredReturnLogs || []).filter(l => l.actionType === 'WRITE_OFF').length, [expiredReturnLogs]);
+  const replacementsCount = useMemo(() => (expiredReturnLogs || []).filter(l => l.actionType === 'REPLACEMENT').length, [expiredReturnLogs]);
+
+  const totalSupplierReturnValuation = useMemo(() => (expiredReturnLogs || []).filter(l => l.actionType === 'RETURN_SUPPLIER').reduce((s, l) => s + Number(l.totalValue || 0), 0), [expiredReturnLogs]);
+  const totalSupplierReturnQty = useMemo(() => (expiredReturnLogs || []).filter(l => l.actionType === 'RETURN_SUPPLIER').reduce((s, l) => s + Number(l.quantity || 0), 0), [expiredReturnLogs]);
+
+  const totalWriteOffValuation = useMemo(() => (expiredReturnLogs || []).filter(l => l.actionType === 'WRITE_OFF').reduce((s, l) => s + Number(l.totalValue || 0), 0), [expiredReturnLogs]);
+  const totalWriteOffQty = useMemo(() => (expiredReturnLogs || []).filter(l => l.actionType === 'WRITE_OFF').reduce((s, l) => s + Number(l.quantity || 0), 0), [expiredReturnLogs]);
+
+  const totalReplacementValuation = useMemo(() => (expiredReturnLogs || []).filter(l => l.actionType === 'REPLACEMENT').reduce((s, l) => s + Number(l.totalValue || 0), 0), [expiredReturnLogs]);
+  const totalReplacementQty = useMemo(() => (expiredReturnLogs || []).filter(l => l.actionType === 'REPLACEMENT').reduce((s, l) => s + Number(l.quantity || 0), 0), [expiredReturnLogs]);
+
+  // Unique Generics & Brands
+  const uniqueGenerics = useMemo(() => {
+    const set = new Set<string>();
+    (companySettings.productGenerics || []).forEach(g => g && g.trim() && set.add(g.trim()));
+    products.forEach(p => p.generic && p.generic.trim() && set.add(p.generic.trim()));
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [companySettings.productGenerics, products]);
+
+  const uniqueManufacturers = useMemo(() => {
+    const set = new Set<string>();
+    (companySettings.productManufacturers || []).forEach(m => m && m.trim() && set.add(m.trim()));
+    products.forEach(p => p.manufacturer && p.manufacturer.trim() && set.add(p.manufacturer.trim()));
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [companySettings.productManufacturers, products]);
+
+  // Filtered Products
+  const filteredProducts = useMemo(() => {
+    const query = search.trim().toLowerCase();
+    return products.filter(p => {
+      const resolvedCatLower = query ? resolveProductCategoryName(p, categories).toLowerCase() : '';
+      const matchSearch =
+        !query ||
+        (p.name || '').toLowerCase().includes(query) ||
+        (p.nameBn || '').toLowerCase().includes(query) ||
+        (p.sku || '').toLowerCase().includes(query) ||
+        (p.barcode || '').toLowerCase().includes(query) ||
+        resolvedCatLower.includes(query) ||
+        (isPharmacyMode && (p.generic || '').toLowerCase().includes(query)) ||
+        (p.manufacturer || '').toLowerCase().includes(query) ||
+        (p.rackLocation || '').toLowerCase().includes(query) ||
+        (isPharmacyMode && (p.strength || '').toLowerCase().includes(query)) ||
+        (isPharmacyMode && (p.dosageForm || '').toLowerCase().includes(query)) ||
+        (isPharmacyMode && (p.dosageSchedule || '').toLowerCase().includes(query)) ||
+        (p.batchNumber || '').toLowerCase().includes(query) ||
+        (Array.isArray(p.batches) && p.batches.some(b => (b?.batchNumber || '').toLowerCase().includes(query)));
+
+      const matchCat = matchesCategoryFilter(p, selectedCategory, categories);
+      const matchGen = !isPharmacyMode || selectedGeneric === 'ALL' || (Boolean(p.generic) && p.generic!.trim().toLowerCase() === selectedGeneric.trim().toLowerCase());
+      const matchMan = selectedManufacturer === 'ALL' || (Boolean(p.manufacturer) && p.manufacturer!.trim().toLowerCase() === selectedManufacturer.trim().toLowerCase());
+
+      // Stock status filter
+      const safeStock = Number(p.stock || 0);
+      const safeReorder = Number(p.reorderLevel ?? 0);
+      let matchStock = true;
+      if (stockStatusFilter === 'IN_STOCK') matchStock = safeStock > 0;
+      else if (stockStatusFilter === 'OUT_OF_STOCK') matchStock = safeStock <= 0;
+      else if (stockStatusFilter === 'LOW_STOCK') matchStock = safeStock <= safeReorder;
+
+      // Tab matching
+      let matchTab = true;
+      if (activeTab === 'low-stock') {
+        matchTab = safeStock <= safeReorder;
+      } else if (activeTab === 'expiry') {
+        const summary = productExpirySummaries.get(p.id);
+        if (expirySubFilter === 'expired') {
+          matchTab = Boolean(summary?.hasExpired);
+        } else if (expirySubFilter === 'expiring-soon') {
+          matchTab = Boolean(summary?.hasExpiringSoon);
+        } else if (expirySubFilter === 'fresh') {
+          matchTab = Boolean(summary?.hasFresh);
+        } else {
+          matchTab = Boolean(summary?.hasAnyExpiry);
+        }
+      }
+
+      // Date Period matching
+      let matchDate = true;
+      if (startDate || endDate) {
+        if (dateFilterTarget === 'createdAt') {
+          const productCreatedDate = normalizeDateToISO(p.createdAt) || (p.createdAt ? String(p.createdAt).substring(0, 10) : '');
+          if (productCreatedDate) {
+            matchDate =
+              (!startDate || productCreatedDate >= startDate) &&
+              (!endDate || productCreatedDate <= endDate);
+          } else {
+            matchDate = true;
+          }
+        } else if (dateFilterTarget === 'expDate') {
+          const allExpDates: string[] = [];
+          const pExp = normalizeDateToISO(p.expDate);
+          if (pExp) allExpDates.push(pExp);
+          if (Array.isArray(p.batches) && p.batches.length > 0) {
+            p.batches.forEach(b => {
+              const bExp = normalizeDateToISO(b?.expDate);
+              if (bExp) allExpDates.push(bExp);
+            });
+          }
+          if (allExpDates.length > 0) {
+            matchDate = allExpDates.some(
+              d => (!startDate || d >= startDate) && (!endDate || d <= endDate)
+            );
+          } else {
+            matchDate = false;
+          }
+        }
+      }
+
+      return matchSearch && matchCat && matchGen && matchMan && matchStock && matchTab && matchDate;
+    });
+  }, [
+    products,
+    categories,
+    search,
+    selectedCategory,
+    selectedGeneric,
+    selectedManufacturer,
+    stockStatusFilter,
+    activeTab,
+    expirySubFilter,
+    startDate,
+    endDate,
+    dateFilterTarget,
+    productExpirySummaries,
+    isPharmacyMode,
+  ]);
+
+  const totalPages = itemsPerPage === 'ALL' ? 1 : Math.max(1, Math.ceil(filteredProducts.length / Number(itemsPerPage)));
+
+  useEffect(() => {
+    if (currentPage > totalPages) {
+      setCurrentPage(1);
+    }
+  }, [totalPages, currentPage]);
+
+  const paginatedProducts = useMemo(() => {
+    if (itemsPerPage === 'ALL') return filteredProducts;
+    const actualPage = Math.min(currentPage, totalPages);
+    const start = (actualPage - 1) * Number(itemsPerPage);
+    return filteredProducts.slice(start, start + Number(itemsPerPage));
+  }, [filteredProducts, itemsPerPage, currentPage, totalPages]);
+
+  // Helper to resolve creator / user display name
+  const getUserDisplayName = (creatorKey?: string) => {
+    if (!creatorKey) return currentUser?.fullName || currentUser?.username || 'Admin';
+    const matched = users?.find(
+      u =>
+        u.id === creatorKey ||
+        u.username.toLowerCase() === creatorKey.toLowerCase() ||
+        u.fullName.toLowerCase() === creatorKey.toLowerCase()
+    );
+    if (matched) {
+      return matched.fullName || matched.username;
+    }
+    if (creatorKey === 'usr-1' || creatorKey === 'usr-admin') {
+      const adminUser = users?.find(u => u.role === 'ADMIN');
+      return adminUser?.fullName || currentUser?.fullName || 'Super Admin';
+    }
+    if (creatorKey === 'usr-2' || creatorKey === 'cashier-1') {
+      const cashierUser = users?.find(u => u.role === 'CASHIER');
+      return cashierUser?.fullName || 'Cashier';
+    }
+    return creatorKey;
+  };
+
+  // Filtered Logs
+  const filteredLogs = useMemo(() => {
+    return (expiredReturnLogs || []).filter(log => {
+      // Tab matching
+      if (activeTab === 'return-logs' && log.actionType !== 'RETURN_SUPPLIER') return false;
+      if (activeTab === 'write-off-logs' && log.actionType !== 'WRITE_OFF') return false;
+      if (activeTab === 'replace-logs' && log.actionType !== 'REPLACEMENT') return false;
+
+      const query = search.trim().toLowerCase();
+      const creatorName = getUserDisplayName(log.createdBy).toLowerCase();
+      const matchSearch =
+        !query ||
+        log.productName.toLowerCase().includes(query) ||
+        log.sku.toLowerCase().includes(query) ||
+        (log.batchNumber && log.batchNumber.toLowerCase().includes(query)) ||
+        (log.notes && log.notes.toLowerCase().includes(query)) ||
+        creatorName.includes(query) ||
+        (log.createdBy && log.createdBy.toLowerCase().includes(query));
+
+      let matchDate = true;
+      if (startDate && endDate && log.date) {
+        matchDate = log.date >= startDate && log.date <= endDate;
+      }
+
+      return matchSearch && matchDate;
+    });
+  }, [expiredReturnLogs, search, startDate, endDate, activeTab, users, currentUser]);
+
+  // Filter Active Check
+  const isAnyFilterActive =
+    Boolean(search) ||
+    selectedCategory !== 'ALL' ||
+    selectedGeneric !== 'ALL' ||
+    selectedManufacturer !== 'ALL' ||
+    stockStatusFilter !== 'ALL' ||
+    Boolean(startDate) ||
+    Boolean(endDate);
+
+  const resetAllFilters = () => {
+    setSearch('');
+    setSelectedCategory('ALL');
+    setSelectedGeneric('ALL');
+    setSelectedManufacturer('ALL');
+    setStockStatusFilter('ALL');
+    setStartDate('');
+    setEndDate('');
+    setPeriodLabel('');
+    setDateFilterTarget('createdAt');
+  };
+
+  // Aggregated Financials
+  const totalStockCount = filteredProducts.reduce((sum, p) => sum + Number(p.stock || 0), 0);
+  const totalCostValuation = filteredProducts.reduce((sum, p) => sum + Number(p.stock || 0) * Number(p.purchasePrice || 0), 0);
+  const totalRetailValuation = filteredProducts.reduce((sum, p) => sum + Number(p.stock || 0) * Number(p.salesPrice || 0), 0);
+  const totalEstimatedMargin = totalRetailValuation - totalCostValuation;
+  const marginPercentage = totalRetailValuation > 0 ? ((totalEstimatedMargin / totalRetailValuation) * 100).toFixed(1) : '0.0';
+
+  const hasDeletePermission = canUserDelete(currentUser, 'product');
+  const hasEditPermission = canUserEdit(currentUser, 'product');
+
+  const handleDelete = (p: Product) => {
+    if (!hasDeletePermission) {
+      showToast(language === 'bn' ? 'আপনার পণ্য ডিলিট করার পারমিশন নেই' : 'You do not have permission to delete products', 'error');
+      return;
+    }
+    if (confirm(language === 'bn' ? `আপনি কি নিশ্চিত যে "${p.name}" পণ্যটি মুছে ফেলতে চান?` : `Are you sure you want to delete product "${p.name}"?`)) {
+      deleteProduct(p.id);
+    }
+  };
+
+  // Print Stock List / Valuation Report
+  const handlePrintProductList = () => {
+    const selectedCategoryLabel = selectedCategory === 'ALL'
+      ? undefined
+      : getCategoryLabelByValue(selectedCategory, categories, products);
+    let heading = language === 'bn' ? 'পণ্য স্টক ও ইনভেন্টরি মূল্যায়ন রিপোর্ট' : 'PRODUCT STOCK & VALUATION REPORT';
+    let filterTag = language === 'bn' ? 'সকল সক্রিয় পণ্য' : 'All Active Inventory';
+
+    if (activeTab === 'expiry') {
+      heading = language === 'bn' ? 'মেয়াদোত্তীর্ণ ও মেয়াদযুক্ত পণ্য রিপোর্ট' : 'EXPIRY DATE TRACKING REPORT';
+      filterTag = language === 'bn' ? 'মেয়াদভিত্তিক পণ্য' : 'Products with Expiry Date';
+    } else if (activeTab === 'low-stock') {
+      heading = language === 'bn' ? 'অল্প স্টক ও রি-অর্ডার এলার্ট রিপোর্ট' : 'LOW STOCK REORDER ALERT REPORT';
+      filterTag = language === 'bn' ? 'অল্প স্টক আইটেম' : 'Low Stock Items (Below Threshold)';
+    } else if (activeTab === 'return-logs') {
+      heading = language === 'bn' ? 'মহাজনে ফেরত পণ্য হিসাব রিপোর্ট' : 'SUPPLIER RETURNS REPORT';
+      filterTag = language === 'bn' ? 'মহাজনে ফেরত হিসাব' : 'Supplier Returns';
+    } else if (activeTab === 'write-off-logs') {
+      heading = language === 'bn' ? 'নষ্ট / অবলোপন (Write-off) হিসাব রিপোর্ট' : 'WRITE-OFFS REPORT';
+      filterTag = language === 'bn' ? 'নষ্ট/অবলোপন হিসাব' : 'Write-offs';
+    } else if (activeTab === 'replace-logs') {
+      heading = language === 'bn' ? 'পণ্য রিপ্লেসমেন্ট (Replace) হিসাব রিপোর্ট' : 'REPLACED PRODUCTS REPORT';
+      filterTag = language === 'bn' ? 'পণ্য রিপ্লেসমেন্ট হিসাব' : 'Replaced Products';
+    }
+
+    const filterTagsArr: string[] = [];
+    if (periodLabel) filterTagsArr.push(`${language === 'bn' ? 'সময়কাল' : 'Period'}: ${periodLabel}`);
+    else if (startDate && endDate) filterTagsArr.push(`${startDate} to ${endDate}`);
+    if (search) filterTagsArr.push(`Search: "${search}"`);
+    if (selectedCategoryLabel) filterTagsArr.push(`Category: ${selectedCategoryLabel}`);
+    if (isPharmacyMode && selectedGeneric !== 'ALL') filterTagsArr.push(`Generic: ${selectedGeneric}`);
+    if (selectedManufacturer !== 'ALL') filterTagsArr.push(`Brand: ${selectedManufacturer}`);
+
+    openPrintModal({
+      type: 'PRODUCT_LIST',
+      title: heading,
+      data: {
+        reportHeading: heading,
+        period: periodLabel || (startDate && endDate ? `${startDate} to ${endDate}` : (language === 'bn' ? 'সকল সময়' : 'All Time')),
+        generatedDate: new Date().toLocaleDateString('en-GB'),
+        categoryFilter: selectedCategoryLabel,
+        filterTag: filterTagsArr.length > 0 ? `${filterTag} (${filterTagsArr.join(', ')})` : filterTag,
+        totalProducts: filteredProducts.length,
+        totalUnits: totalStockCount,
+        totalCostValue: totalCostValuation,
+        totalRetailValue: totalRetailValuation,
+        products: filteredProducts,
+      },
+    });
+  };
+
+  // CSV Export Handler
+  const handleExportCsv = () => {
+    if (!canUserExportProductCsv(currentUser)) {
+      showToast(
+        language === 'bn'
+          ? 'আপনার প্রোডাক্ট ডিরেক্টরি থেকে CSV এক্সপোর্ট করার অনুমতি নেই।'
+          : 'You do not have permission to Export CSV from Product Directory.',
+        'error'
+      );
+      return;
+    }
+
+    const escCsv = (val: any) => `"${String(val ?? '').replace(/"/g, '""')}"`;
+
+    const headers = [
+      'Product Name',
+      'Bangla Name',
+      'SKU',
+      'Barcode',
+      'Category',
+      ...(isPharmacyMode ? ['Generic'] : []),
+      'Brand / Manufacturer',
+      ...(isPharmacyMode ? ['Strength', 'Dosage Form', 'Dosage Schedule'] : []),
+      'Batch No',
+      'Date Added',
+      'Expiry Date',
+      'Purchase Price (Tk)',
+      'Sales Price (Tk)',
+      'Stock Qty',
+      'Unit',
+      'Purchase Unit',
+      'Unit Conversion',
+      'Reorder Level',
+      'Total Cost Valuation (Tk)',
+      'Total Sales Valuation (Tk)',
+    ];
+
+    const rows = filteredProducts.map(p => {
+      const batchNoList = Array.from(
+        new Set([
+          ...(p.batchNumber && String(p.batchNumber).trim() ? [String(p.batchNumber).trim()] : []),
+          ...((p.batches || [])
+            .filter(b => b && b.batchNumber && String(b.batchNumber).trim())
+            .map(b => String(b.batchNumber).trim())),
+        ])
+      ).join(' | ');
+
+      return [
+        escCsv(p.name),
+        escCsv(p.nameBn || ''),
+        escCsv(p.sku || ''),
+        escCsv(p.barcode || ''),
+        escCsv(resolveProductCategoryName(p, categories)),
+        ...(isPharmacyMode ? [escCsv(p.generic || '')] : []),
+        escCsv(p.manufacturer || ''),
+        ...(isPharmacyMode ? [escCsv(p.strength || ''), escCsv(p.dosageForm || ''), escCsv(p.dosageSchedule || '')] : []),
+        escCsv(batchNoList),
+        escCsv(p.createdAt || ''),
+        escCsv(p.expDate || ''),
+        p.purchasePrice,
+        p.salesPrice,
+        p.stock,
+        escCsv(p.unit || ''),
+        escCsv(p.purchaseUnit || p.unit || ''),
+        p.unitConversion && p.unitConversion > 1 ? p.unitConversion : 1,
+        p.reorderLevel,
+        (Number(p.stock || 0) * Number(p.purchasePrice || 0)).toFixed(2),
+        (Number(p.stock || 0) * Number(p.salesPrice || 0)).toFixed(2),
+      ];
+    });
+
+    const csvString = '\uFEFF' + [headers.map(escCsv).join(','), ...rows.map(e => e.join(','))].join('\n');
+    const blob = new Blob([csvString], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.setAttribute('href', url);
+    link.setAttribute('download', `Product_Directory_${startDate || 'all'}_to_${endDate || 'all'}_${new Date().toISOString().split('T')[0]}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    showToast(language === 'bn' ? 'Batch No সহ CSV ফাইল ডাউনলোড সম্পন্ন হয়েছে।' : 'CSV exported successfully with Batch No.');
+  };
+
+  const handlePrintBarcodes = () => {
+    if (!barcodeProduct) return;
+    openPrintModal({
+      type: 'BARCODE_SHEET',
+      title: `Barcode Labels - ${barcodeProduct.name}`,
+      data: {
+        product: barcodeProduct,
+        quantity: barcodeCount,
+      },
+    });
+    setBarcodeProduct(null);
+  };
+
+  return (
+    <div className="space-y-4">
+      {/* 1. Header with Actions */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-white dark:bg-zinc-900 p-4 rounded-xl border border-zinc-200 dark:border-zinc-800 shadow-xs">
+        <div>
+          <h2 className="text-lg font-bold text-zinc-900 dark:text-white flex items-center gap-2">
+            <Package className="w-5 h-5 text-emerald-600" />
+            <span>{language === 'bn' ? 'প্রোডাক্ট ডাইরেক্টরি ও স্টক' : t('products_list')}</span>
+          </h2>
+          <p className="text-xs text-zinc-500 dark:text-zinc-400">
+            {language === 'bn'
+              ? 'দৈনিক, মাসিক, ডেট টু ডেট যোগকৃত পণ্য ও ইনভেন্টরি স্টক মূল্যায়ন'
+              : 'Daily, Monthly, Date-to-Date stock directory, expiry tracking and valuation analysis'}
+          </p>
+        </div>
+
+        <div className="flex items-center gap-2 flex-wrap">
+          <button
+            type="button"
+            onClick={() => setShowImportModal(true)}
+            className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-semibold shadow-xs flex items-center gap-1.5 cursor-pointer transition-colors"
+          >
+            <Upload className="w-3.5 h-3.5" />
+            <span>{language === 'bn' ? 'পণ্য আপলোড / ইমপোর্ট' : 'Import Products'}</span>
+          </button>
+
+          {(() => {
+            const hasExportPerm = canUserExportProductCsv(currentUser);
+            return (
+              <button
+                type="button"
+                onClick={handleExportCsv}
+                title={
+                  !hasExportPerm
+                    ? (language === 'bn' ? 'CSV এক্সপোর্ট করার পারমিশন নেই' : 'No permission to Export CSV')
+                    : (language === 'bn' ? 'CSV ডাউনলোড' : 'Export CSV')
+                }
+                className={`px-3.5 py-2 rounded-lg text-xs font-semibold shadow-xs flex items-center gap-1.5 transition-colors border ${
+                  hasExportPerm
+                    ? 'bg-zinc-100 hover:bg-zinc-200 dark:bg-zinc-800 dark:hover:bg-zinc-700 text-zinc-700 dark:text-zinc-300 border-zinc-200 dark:border-zinc-700 cursor-pointer'
+                    : 'bg-zinc-100/60 dark:bg-zinc-800/40 text-zinc-400 dark:text-zinc-600 border-zinc-200 dark:border-zinc-800 cursor-not-allowed opacity-75'
+                }`}
+              >
+                <Download className={`w-3.5 h-3.5 ${hasExportPerm ? 'text-emerald-600 dark:text-emerald-400' : 'text-zinc-400 dark:text-zinc-600'}`} />
+                <span>{language === 'bn' ? 'CSV ডাউনলোড' : 'Export CSV'}</span>
+              </button>
+            );
+          })()}
+
+          <button
+            type="button"
+            onClick={handlePrintProductList}
+            className="px-3.5 py-2 bg-zinc-800 hover:bg-zinc-700 text-white rounded-lg text-xs font-semibold shadow-xs flex items-center gap-1.5 cursor-pointer transition-colors"
+          >
+            <Printer className="w-3.5 h-3.5 text-blue-400" />
+            <span>{language === 'bn' ? 'স্টক রিপোর্ট প্রিন্ট' : 'Print Stock List'}</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setIsCameraScannerOpen(true)}
+            className="px-3.5 py-2 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white rounded-lg text-xs font-bold flex items-center gap-1.5 cursor-pointer shadow-xs transition-all"
+            title={language === 'bn' ? 'ক্যামেরা দিয়ে বারকোড স্ক্যান করুন' : 'Scan Barcode with Camera'}
+          >
+            <Camera className="w-3.5 h-3.5 animate-pulse" />
+            <span>{language === 'bn' ? '📷 ক্যামেরা স্ক্যান' : 'Camera Scan'}</span>
+          </button>
+
+          {products.length > 0 && currentUser?.role === 'ADMIN' && (
+            <button
+              type="button"
+              onClick={() => {
+                if (currentUser?.role !== 'ADMIN') {
+                  showToast(
+                    language === 'bn' 
+                      ? 'শুধুমাত্র অ্যাডমিন (ADMIN) সমস্ত পণ্য মুছে ফেলার অনুমতি রাখেন!' 
+                      : 'Only ADMIN users are authorized to clear all products!', 
+                    'error'
+                  );
+                  return;
+                }
+                const promptMsg = language === 'bn' 
+                  ? `[অ্যাডমিন নিশ্চিতকরণ] আপনি কি নিশ্চিত যে ইনভেন্টরির সকল (${products.length}টি) পণ্য সম্পূর্ণ মুছে ফেলতে চান? এটি মুছে ফেললে ডাটাবেজ সম্পূর্ণ ফাঁকা (Fresh) হয়ে যাবে।`
+                  : `[Admin Confirmation] Are you sure you want to clear all ${products.length} products from inventory? This will make the product list completely empty.`;
+                if (window.confirm(promptMsg)) {
+                  deleteAllProducts();
+                }
+              }}
+              className="px-3 py-2 bg-rose-50 hover:bg-rose-100 dark:bg-rose-950/40 dark:hover:bg-rose-900/60 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-800 rounded-lg text-xs font-semibold shadow-xs flex items-center gap-1.5 cursor-pointer transition-colors"
+              title={language === 'bn' ? 'শুধুমাত্র অ্যাডমিন: সকল পণ্য মুছে ফাঁকা করুন' : 'Admin Only: Clear all products'}
+            >
+              <Trash2 className="w-3.5 h-3.5 text-rose-600 dark:text-rose-400" />
+              <span>{language === 'bn' ? 'সব পণ্য মুছুন (Admin)' : 'Clear All (Admin)'}</span>
+            </button>
+          )}
+
+          <button
+            type="button"
+            onClick={onOpenAddModal}
+            className="px-3.5 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-semibold shadow-xs flex items-center gap-1.5 cursor-pointer transition-colors"
+          >
+            <Plus className="w-3.5 h-3.5" />
+            <span>{language === 'bn' ? 'নতুন পণ্য যোগ করুন' : 'Add New Product'}</span>
+          </button>
+        </div>
+      </div>
+
+      {/* 2. Primary Sub-View Switcher Tabs */}
+      <div className="flex items-center gap-1.5 bg-zinc-100 dark:bg-zinc-850 p-1.5 rounded-xl border border-zinc-200 dark:border-zinc-800 overflow-x-auto">
+        <button
+          type="button"
+          onClick={() => {
+            setActiveTab('all');
+            setDateFilterTarget('createdAt');
+          }}
+          className={`px-3.5 py-2 rounded-lg text-xs font-bold transition-all whitespace-nowrap cursor-pointer flex items-center gap-2 ${
+            activeTab === 'all'
+              ? 'bg-white dark:bg-zinc-900 text-blue-600 dark:text-blue-400 shadow-xs'
+              : 'text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-white'
+          }`}
+        >
+          <Boxes className="w-4 h-4" />
+          <span>{language === 'bn' ? 'সকল পণ্য ডাইরেক্টরি' : 'All Products'}</span>
+          <span className="px-1.5 py-0.5 rounded-md text-[10px] bg-zinc-100 dark:bg-zinc-800 font-mono">
+            {products.length}
+          </span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => {
+            setActiveTab('batch-inventory');
+          }}
+          className={`px-3.5 py-2 rounded-lg text-xs font-bold transition-all whitespace-nowrap cursor-pointer flex items-center gap-2 ${
+            activeTab === 'batch-inventory'
+              ? 'bg-indigo-600 text-white shadow-xs'
+              : 'text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-white'
+          }`}
+        >
+          <Layers className="w-4 h-4 text-indigo-400" />
+          <span>{language === 'bn' ? '📦 ব্যাচ ইনভেন্টরি' : '📦 Batch Inventory'}</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => {
+            setActiveTab('expiry');
+            setDateFilterTarget('expDate');
+          }}
+          className={`px-3.5 py-2 rounded-lg text-xs font-bold transition-all whitespace-nowrap cursor-pointer flex items-center gap-2 ${
+            activeTab === 'expiry'
+              ? 'bg-white dark:bg-zinc-900 text-purple-600 dark:text-purple-400 shadow-xs'
+              : 'text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-white'
+          }`}
+        >
+          <AlertTriangle className="w-4 h-4 text-amber-500" />
+          <span>{language === 'bn' ? 'মেয়াদ ট্র্যাকিং ও প্রতিস্থাপন' : 'Expiry Tracking'}</span>
+          {expiredCount > 0 && (
+            <span className="px-1.5 py-0.2 bg-rose-500 text-white text-[10px] font-mono font-bold rounded-full animate-pulse">
+              {expiredCount} Exp
+            </span>
+          )}
+        </button>
+
+        <button
+          type="button"
+          onClick={() => {
+            setActiveTab('low-stock');
+            setDateFilterTarget('createdAt');
+          }}
+          className={`px-3.5 py-2 rounded-lg text-xs font-bold transition-all whitespace-nowrap cursor-pointer flex items-center gap-2 ${
+            activeTab === 'low-stock'
+              ? 'bg-white dark:bg-zinc-900 text-amber-600 dark:text-amber-400 shadow-xs'
+              : 'text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-white'
+          }`}
+        >
+          <Tag className="w-4 h-4 text-amber-500" />
+          <span>{language === 'bn' ? 'অল্প স্টক / রি-অর্ডার' : 'Low Stock Alerts'}</span>
+          <span className="px-1.5 py-0.5 rounded-md text-[10px] bg-amber-100 dark:bg-amber-950 text-amber-800 dark:text-amber-300 font-mono font-bold">
+            {lowStockCount}
+          </span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => {
+            setActiveTab('return-logs');
+          }}
+          className={`px-3.5 py-2 rounded-lg text-xs font-bold transition-all whitespace-nowrap cursor-pointer flex items-center gap-2 ${
+            activeTab === 'return-logs'
+              ? 'bg-white dark:bg-zinc-900 text-blue-600 dark:text-blue-400 shadow-xs'
+              : 'text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-white'
+          }`}
+        >
+          <FileText className="w-4 h-4" />
+          <span>{language === 'bn' ? 'মহাজনে ফেরত' : 'Supplier Returns'}</span>
+          <span className="px-1.5 py-0.5 rounded-md text-[10px] bg-blue-100 dark:bg-blue-900 text-blue-800 dark:text-blue-300 font-mono">
+            {supplierReturnsCount}
+          </span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => {
+            setActiveTab('write-off-logs');
+          }}
+          className={`px-3.5 py-2 rounded-lg text-xs font-bold transition-all whitespace-nowrap cursor-pointer flex items-center gap-2 ${
+            activeTab === 'write-off-logs'
+              ? 'bg-white dark:bg-zinc-900 text-rose-600 dark:text-rose-400 shadow-xs'
+              : 'text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-white'
+          }`}
+        >
+          <FileText className="w-4 h-4" />
+          <span>{language === 'bn' ? 'নষ্ট / রাইট অফ' : 'Write-offs'}</span>
+          <span className="px-1.5 py-0.5 rounded-md text-[10px] bg-rose-100 dark:bg-rose-900 text-rose-800 dark:text-rose-300 font-mono">
+            {writeOffsCount}
+          </span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => {
+            setActiveTab('replace-logs');
+          }}
+          className={`px-3.5 py-2 rounded-lg text-xs font-bold transition-all whitespace-nowrap cursor-pointer flex items-center gap-2 ${
+            activeTab === 'replace-logs'
+              ? 'bg-white dark:bg-zinc-900 text-purple-600 dark:text-purple-400 shadow-xs'
+              : 'text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-white'
+          }`}
+        >
+          <RefreshCw className="w-4 h-4 text-purple-600 dark:text-purple-400" />
+          <span>{language === 'bn' ? 'পণ্য রিপ্লেসমেন্ট (Replace)' : 'Replaced Products'}</span>
+          <span className="px-1.5 py-0.5 rounded-md text-[10px] bg-purple-100 dark:bg-purple-900 text-purple-800 dark:text-purple-300 font-mono font-bold">
+            {replacementsCount}
+          </span>
+        </button>
+      </div>
+
+      {/* If Batch Inventory tab is active, render BatchInventoryView */}
+      {activeTab === 'batch-inventory' ? (
+        <BatchInventoryView />
+      ) : (
+        <>
+          {/* Expiry Sub-Filters Bar if Expiry Tab Active */}
+      {activeTab === 'expiry' && (
+        <div className="flex flex-wrap items-center justify-between gap-3 bg-purple-50/70 dark:bg-purple-950/40 p-3 rounded-2xl border border-purple-200 dark:border-purple-900 shadow-2xs">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-xs font-bold text-purple-900 dark:text-purple-300 flex items-center gap-1.5 mr-1">
+              <Clock className="w-4 h-4 text-purple-600 dark:text-purple-400" />
+              <span>{language === 'bn' ? 'মেয়াদ স্ট্যাটাস ফিল্টার:' : 'Expiry Status:'}</span>
+            </span>
+            <button
+              type="button"
+              onClick={() => {
+                setExpirySubFilter('expired');
+              }}
+              className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+                expirySubFilter === 'expired'
+                  ? 'bg-rose-600 text-white shadow-xs'
+                  : 'bg-white dark:bg-zinc-800 text-rose-700 dark:text-rose-300 hover:bg-rose-100 border border-rose-200 dark:border-rose-900/60'
+              }`}
+            >
+              <span>{language === 'bn' ? '🔴 মেয়াদোত্তীর্ণ' : '🔴 Expired'}</span>
+              <span className="font-mono bg-black/10 dark:bg-white/10 px-1.5 py-0.2 rounded-full text-[11px]">({expiredCount})</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setExpirySubFilter('expiring-soon');
+              }}
+              className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+                expirySubFilter === 'expiring-soon'
+                  ? 'bg-amber-600 text-white shadow-xs'
+                  : 'bg-white dark:bg-zinc-800 text-amber-700 dark:text-amber-300 hover:bg-amber-100 border border-amber-200 dark:border-amber-900/60'
+              }`}
+            >
+              <span>{language === 'bn' ? '🟡 ৩০ দিনের মধ্যে শেষ' : '🟡 Within 30 Days'}</span>
+              <span className="font-mono bg-black/10 dark:bg-white/10 px-1.5 py-0.2 rounded-full text-[11px]">({expiringSoonCount})</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setExpirySubFilter('fresh');
+              }}
+              className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+                expirySubFilter === 'fresh'
+                  ? 'bg-emerald-600 text-white shadow-xs'
+                  : 'bg-white dark:bg-zinc-800 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-100 border border-emerald-200 dark:border-emerald-900/60'
+              }`}
+            >
+              <span>{language === 'bn' ? '🟢 সতেজ / বৈধ মেয়াদ' : '🟢 Fresh / Valid'}</span>
+              <span className="font-mono bg-black/10 dark:bg-white/10 px-1.5 py-0.2 rounded-full text-[11px]">({freshDatedCount})</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setExpirySubFilter('all-dated');
+              }}
+              className={`px-3 py-1.5 rounded-xl text-xs font-medium transition-all cursor-pointer border ${
+                expirySubFilter === 'all-dated'
+                  ? 'bg-purple-600 text-white shadow-xs font-bold border-purple-600'
+                  : 'bg-white dark:bg-zinc-800 text-purple-700 dark:text-purple-300 hover:bg-purple-100 border-purple-200 dark:border-purple-800'
+              }`}
+            >
+              {language === 'bn' ? 'সকল মেয়াদযুক্ত পণ্য' : 'All Dated'} ({totalDatedCount})
+            </button>
+          </div>
+
+          {/* View Mode Toggle: 3 Columns Board vs Table */}
+          <div className="flex items-center gap-1 bg-white dark:bg-zinc-900 p-1 rounded-xl border border-purple-200 dark:border-purple-800 text-xs shadow-2xs">
+            <button
+              type="button"
+              onClick={() => setExpiryViewMode('columns')}
+              className={`px-3 py-1.5 rounded-lg font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
+                expiryViewMode === 'columns'
+                  ? 'bg-purple-600 text-white shadow-xs'
+                  : 'text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-white'
+              }`}
+            >
+              <LayoutGrid className="w-3.5 h-3.5" />
+              <span>{language === 'bn' ? '৩টি কলাম ভিউ (Kanban)' : '3 Columns Kanban'}</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setExpiryViewMode('table')}
+              className={`px-3 py-1.5 rounded-lg font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
+                expiryViewMode === 'table'
+                  ? 'bg-purple-600 text-white shadow-xs'
+                  : 'text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-white'
+              }`}
+            >
+              <List className="w-3.5 h-3.5" />
+              <span>{language === 'bn' ? 'টেবিল ভিউ' : 'Table View'}</span>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* 3. Summary Analytics KPI Cards */}
+      {activeTab === 'return-logs' || activeTab === 'write-off-logs' || activeTab === 'replace-logs' ? (
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          {/* Supplier Return Card */}
+          <div className={`p-3.5 rounded-xl border shadow-2xs transition-all ${
+            activeTab === 'return-logs'
+              ? 'bg-blue-50/80 dark:bg-blue-950/40 border-blue-300 dark:border-blue-700 ring-2 ring-blue-500/20'
+              : 'bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800'
+          }`}>
+            <div className="text-xs text-blue-700 dark:text-blue-300 font-bold flex items-center justify-between">
+              <span>{language === 'bn' ? 'মহাজনে ফেরত হিসাব (Supplier Returns):' : 'Supplier Returns Total:'}</span>
+              <span className="text-[10px] px-2 py-0.5 rounded bg-blue-100 dark:bg-blue-900 text-blue-800 dark:text-blue-200 font-mono font-bold">
+                {supplierReturnsCount} {language === 'bn' ? 'টি রেকর্ড' : 'logs'}
+              </span>
+            </div>
+            <div className="text-2xl font-black text-blue-700 dark:text-blue-300 font-mono mt-1">
+              {formatCurrency(totalSupplierReturnValuation)}
+            </div>
+            <div className="text-[11px] text-blue-600 dark:text-blue-400 mt-1 font-mono flex items-center justify-between">
+              <span>{language === 'bn' ? 'ফেরতকৃত মোট পণ্য:' : 'Total Items:'}</span>
+              <strong className="font-bold">{totalSupplierReturnQty} Units</strong>
+            </div>
+          </div>
+
+          {/* Write-offs Card */}
+          <div className={`p-3.5 rounded-xl border shadow-2xs transition-all ${
+            activeTab === 'write-off-logs'
+              ? 'bg-rose-50/80 dark:bg-rose-950/40 border-rose-300 dark:border-rose-700 ring-2 ring-rose-500/20'
+              : 'bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800'
+          }`}>
+            <div className="text-xs text-rose-700 dark:text-rose-300 font-bold flex items-center justify-between">
+              <span>{language === 'bn' ? 'নষ্ট / রাইট অফ (Write-offs) হিসাব:' : 'Write-offs Total:'}</span>
+              <span className="text-[10px] px-2 py-0.5 rounded bg-rose-100 dark:bg-rose-900 text-rose-800 dark:text-rose-200 font-mono font-bold">
+                {writeOffsCount} {language === 'bn' ? 'টি রেকর্ড' : 'logs'}
+              </span>
+            </div>
+            <div className="text-2xl font-black text-rose-700 dark:text-rose-300 font-mono mt-1">
+              {formatCurrency(totalWriteOffValuation)}
+            </div>
+            <div className="text-[11px] text-rose-600 dark:text-rose-400 mt-1 font-mono flex items-center justify-between">
+              <span>{language === 'bn' ? 'অবলোপনকৃত মোট পণ্য:' : 'Total Written Off:'}</span>
+              <strong className="font-bold">{totalWriteOffQty} Units</strong>
+            </div>
+          </div>
+
+          {/* Replaced Products Card - Next to Write-offs */}
+          <div className={`p-3.5 rounded-xl border shadow-2xs transition-all ${
+            activeTab === 'replace-logs'
+              ? 'bg-purple-50/80 dark:bg-purple-950/40 border-purple-300 dark:border-purple-700 ring-2 ring-purple-500/20'
+              : 'bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800'
+          }`}>
+            <div className="text-xs text-purple-700 dark:text-purple-300 font-bold flex items-center justify-between">
+              <span className="flex items-center gap-1.5">
+                <RefreshCw className="w-3.5 h-3.5 text-purple-600 dark:text-purple-400" />
+                <span>{language === 'bn' ? 'পণ্য রিপ্লেসমেন্ট (Replace) হিসাব:' : 'Replaced Products Total:'}</span>
+              </span>
+              <span className="text-[10px] px-2 py-0.5 rounded bg-purple-100 dark:bg-purple-900 text-purple-800 dark:text-purple-200 font-mono font-bold">
+                {replacementsCount} {language === 'bn' ? 'টি রেকর্ড' : 'logs'}
+              </span>
+            </div>
+            <div className="text-2xl font-black text-purple-700 dark:text-purple-300 font-mono mt-1">
+              {formatCurrency(totalReplacementValuation)}
+            </div>
+            <div className="text-[11px] text-purple-600 dark:text-purple-400 mt-1 font-mono flex items-center justify-between">
+              <span>{language === 'bn' ? 'প্রতিস্থাপিত মোট পণ্য:' : 'Total Replaced:'}</span>
+              <strong className="font-bold">{totalReplacementQty} Units</strong>
+            </div>
+          </div>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <div className="p-3.5 bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-800 shadow-2xs">
+            <div className="text-xs text-zinc-500 dark:text-zinc-400 font-medium">
+              {language === 'bn' ? 'ফিল্টারকৃত পণ্য সংখ্যা:' : 'Filtered Products:'}
+            </div>
+            <div className="text-xl font-black text-zinc-900 dark:text-white font-mono mt-0.5">
+              {filteredProducts.length} <span className="text-xs font-normal text-zinc-400">({totalStockCount} units)</span>
+            </div>
+            <div className="text-[10px] text-zinc-400 mt-1 font-mono">
+              {periodLabel || (language === 'bn' ? 'সকল সময়' : 'All Time')}
+            </div>
+          </div>
+
+          <div className="p-3.5 bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-800 shadow-2xs">
+            <div className="text-xs text-emerald-600 dark:text-emerald-400 font-medium">
+              {language === 'bn' ? 'মোট ক্রয় মূল্য (ইনভেন্টরি অ্যাসেট):' : 'Total Inventory Cost Asset:'}
+            </div>
+            <div className="text-xl font-black text-emerald-600 dark:text-emerald-400 font-mono mt-0.5">
+              {formatCurrency(totalCostValuation)}
+            </div>
+            <div className="text-[10px] text-emerald-500/80 mt-1">
+              {language === 'bn' ? 'ক্রয় মূল্যের ভিত্তিতে মজুদ সম্পদ' : 'Asset valuation based on purchase rate'}
+            </div>
+          </div>
+
+          <div className="p-3.5 bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-800 shadow-2xs">
+            <div className="text-xs text-sky-600 dark:text-sky-400 font-medium">
+              {language === 'bn' ? 'প্রাক্কলিত বিক্রয় মূল্য:' : 'Estimated Retail Value:'}
+            </div>
+            <div className="text-xl font-black text-sky-600 dark:text-sky-400 font-mono mt-0.5">
+              {formatCurrency(totalRetailValuation)}
+            </div>
+            <div className="text-[10px] text-sky-500/80 mt-1">
+              {language === 'bn' ? 'বিক্রয় মূল্যের ভিত্তিতে সম্ভাব্য আয়' : 'Estimated revenue on sales rate'}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 4. Date Period Filter (দৈনিক, মাসিক, ডেট টু ডেট) with Target Basis Toggle */}
+      <div className="space-y-2">
+        <div className="flex flex-wrap items-center justify-between gap-2 bg-zinc-50 dark:bg-zinc-850 p-2.5 rounded-xl border border-zinc-200 dark:border-zinc-800">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-xs font-bold text-zinc-700 dark:text-zinc-300 flex items-center gap-1.5">
+              <Calendar className="w-4 h-4 text-emerald-600" />
+              <span>{language === 'bn' ? 'তারিখ ফিল্টার ভিত্তি:' : 'Date Filter Target:'}</span>
+            </span>
+
+            <div className="flex items-center gap-1 bg-white dark:bg-zinc-900 p-1 rounded-lg border border-zinc-200 dark:border-zinc-700 text-xs">
+              <button
+                type="button"
+                onClick={() => setDateFilterTarget('createdAt')}
+                className={`px-2.5 py-1 rounded font-medium transition-colors cursor-pointer ${
+                  dateFilterTarget === 'createdAt'
+                    ? 'bg-emerald-600 text-white font-bold shadow-2xs'
+                    : 'text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-white'
+                }`}
+              >
+                {language === 'bn' ? '📥 পণ্য যোগ করার তারিখ (Added Date)' : '📥 Date Added (Created)'}
+              </button>
+              <button
+                type="button"
+                onClick={() => setDateFilterTarget('expDate')}
+                className={`px-2.5 py-1 rounded font-medium transition-colors cursor-pointer ${
+                  dateFilterTarget === 'expDate'
+                    ? 'bg-purple-600 text-white font-bold shadow-2xs'
+                    : 'text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-white'
+                }`}
+              >
+                {language === 'bn' ? '⏳ মেয়াদ উত্তীর্ণের তারিখ (Expiry Date)' : '⏳ Expiry Date'}
+              </button>
+            </div>
+          </div>
+
+          {isAnyFilterActive && (
+            <button
+              type="button"
+              onClick={resetAllFilters}
+              className="px-2.5 py-1 text-xs text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/50 rounded-lg flex items-center gap-1 font-semibold transition-colors cursor-pointer"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+              <span>{language === 'bn' ? 'ফিল্টার রিসেট' : 'Reset Filters'}</span>
+            </button>
+          )}
+        </div>
+
+        {/* The Reusable DatePeriodFilter Component (Daily, Monthly, Custom Date Range) */}
+        <DatePeriodFilter
+          startDate={startDate}
+          endDate={endDate}
+          onChange={(s, e, label) => {
+            setStartDate(s);
+            setEndDate(e);
+            setPeriodLabel(label || '');
+          }}
+          language={language}
+        />
+      </div>
+
+      {/* 5. Multi-Dimension Filters Bar (Search, Category, Generic, Brand, Stock Status) */}
+      <div className="bg-white dark:bg-zinc-900 p-3.5 rounded-xl border border-zinc-200 dark:border-zinc-800 shadow-2xs space-y-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-2.5">
+          {/* Search Box */}
+          <div className="lg:col-span-1">
+            <label className="block text-[10px] font-bold text-zinc-500 dark:text-zinc-400 uppercase tracking-wider mb-1">
+              {language === 'bn' ? 'সার্চ' : 'Search'}
+            </label>
+            <div className="relative">
+              <Search className="w-3.5 h-3.5 text-zinc-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
+              <input
+                type="text"
+                value={search}
+                onChange={e => setSearch(e.target.value)}
+                placeholder={
+                  language === 'bn'
+                    ? (isPharmacyMode ? 'নাম, SKU, বারকোড, জেনেরিক, ব্যাচ নং...' : 'নাম, SKU, বারকোড, ব্র্যান্ড, ক্যাটাগরি...')
+                    : (isPharmacyMode ? 'Name, SKU, Barcode, Generic, Batch No...' : 'Name, SKU, Barcode, Brand, Category...')
+                }
+                className="w-full pl-8 pr-2.5 py-1.5 bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg text-xs"
+              />
+            </div>
+          </div>
+
+          {/* Category Filter */}
+          <div>
+            <label className="block text-[10px] font-bold text-zinc-500 dark:text-zinc-400 uppercase tracking-wider mb-1">
+              {language === 'bn' ? 'ক্যাটাগরি' : 'Category'}
+            </label>
+            <select
+              value={selectedCategory}
+              onChange={e => setSelectedCategory(e.target.value)}
+              className="w-full py-1.5 px-2.5 bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg text-xs font-medium text-zinc-800 dark:text-zinc-200"
+            >
+              <option value="ALL">{language === 'bn' ? 'সকল ক্যাটাগরি (All)' : 'All Categories'}</option>
+              {unifiedCategories.map(c => (
+                <option key={c.id} value={c.id}>
+                  {c.name} {c.nameBn ? `(${c.nameBn})` : ''}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {/* Generic Filter (Pharmacy Mode only) */}
+          {isPharmacyMode && (
+            <div>
+              <label className="block text-[10px] font-bold text-zinc-500 dark:text-zinc-400 uppercase tracking-wider mb-1">
+                {language === 'bn' ? 'জেনেরিক' : 'Generic'}
+              </label>
+              <select
+                value={selectedGeneric}
+                onChange={e => setSelectedGeneric(e.target.value)}
+                className="w-full py-1.5 px-2.5 bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg text-xs font-medium text-zinc-800 dark:text-zinc-200"
+              >
+                <option value="ALL">{language === 'bn' ? 'সকল জেনেরিক (All)' : 'All Generics'}</option>
+                {uniqueGenerics.map(g => (
+                  <option key={g} value={g}>
+                    {g}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          {/* Brand / Manufacturer Filter */}
+          <div>
+            <label className="block text-[10px] font-bold text-zinc-500 dark:text-zinc-400 uppercase tracking-wider mb-1">
+              {language === 'bn' ? 'কোম্পানি / ব্র্যান্ড' : 'Brand / Company'}
+            </label>
+            <select
+              value={selectedManufacturer}
+              onChange={e => setSelectedManufacturer(e.target.value)}
+              className="w-full py-1.5 px-2.5 bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg text-xs font-medium text-zinc-800 dark:text-zinc-200"
+            >
+              <option value="ALL">{language === 'bn' ? 'সকল ব্র্যান্ড (All)' : 'All Brands'}</option>
+              {uniqueManufacturers.map(m => (
+                <option key={m} value={m}>
+                  {m}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {/* Stock Status Filter */}
+          <div>
+            <label className="block text-[10px] font-bold text-zinc-500 dark:text-zinc-400 uppercase tracking-wider mb-1">
+              {language === 'bn' ? 'স্টক স্ট্যাটাস' : 'Stock Status'}
+            </label>
+            <select
+              value={stockStatusFilter}
+              onChange={e => setStockStatusFilter(e.target.value as any)}
+              className="w-full py-1.5 px-2.5 bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg text-xs font-medium text-zinc-800 dark:text-zinc-200"
+            >
+              <option value="ALL">{language === 'bn' ? 'সকল স্টক অবস্থা' : 'All Stock Status'}</option>
+              <option value="IN_STOCK">{language === 'bn' ? 'মজুদ আছে (In Stock)' : 'In Stock (>0)'}</option>
+              <option value="LOW_STOCK">{language === 'bn' ? 'অল্প স্টক / শেষ পর্যায়ে' : 'Low Stock (<= Reorder)'}</option>
+              <option value="OUT_OF_STOCK">{language === 'bn' ? 'স্টক শেষ (Out of Stock)' : 'Out of Stock (=0)'}</option>
+            </select>
+          </div>
+        </div>
+
+        {/* Active Filter Badges Bar */}
+        <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-zinc-100 dark:border-zinc-800 text-xs">
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <span className="text-zinc-400 text-[11px]">{language === 'bn' ? 'বর্তমান ফিল্টার:' : 'Active Filter:'}</span>
+            {periodLabel ? (
+              <span className="px-2 py-0.5 rounded-md bg-emerald-50 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300 font-medium text-[11px] border border-emerald-200 dark:border-emerald-800">
+                📅 {periodLabel} ({dateFilterTarget === 'createdAt' ? (language === 'bn' ? 'যোগের তারিখ' : 'Added Date') : (language === 'bn' ? 'মেয়াদ তারিখ' : 'Expiry Date')})
+              </span>
+            ) : startDate && endDate ? (
+              <span className="px-2 py-0.5 rounded-md bg-emerald-50 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300 font-medium text-[11px] border border-emerald-200 dark:border-emerald-800">
+                📅 {startDate} হতে {endDate}
+              </span>
+            ) : (
+              <span className="px-2 py-0.5 rounded-md bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400 text-[11px]">
+                {language === 'bn' ? 'সকল সময় (All Time)' : 'All Time'}
+              </span>
+            )}
+
+            {selectedCategory !== 'ALL' && (
+              <span className="px-2 py-0.5 rounded-md bg-blue-50 text-blue-800 dark:bg-blue-950/60 dark:text-blue-300 font-medium text-[11px] border border-blue-200 dark:border-blue-800">
+                Category: {getCategoryLabelByValue(selectedCategory, categories, products)}
+              </span>
+            )}
+
+            {selectedGeneric !== 'ALL' && (
+              <span className="px-2 py-0.5 rounded-md bg-purple-50 text-purple-800 dark:bg-purple-950/60 dark:text-purple-300 font-medium text-[11px] border border-purple-200 dark:border-purple-800">
+                Generic: {selectedGeneric}
+              </span>
+            )}
+
+            {selectedManufacturer !== 'ALL' && (
+              <span className="px-2 py-0.5 rounded-md bg-indigo-50 text-indigo-800 dark:bg-indigo-950/60 dark:text-indigo-300 font-medium text-[11px] border border-indigo-200 dark:border-indigo-800">
+                Brand: {selectedManufacturer}
+              </span>
+            )}
+          </div>
+
+          <div className="flex items-center gap-2 font-mono text-zinc-500 font-semibold">
+            <span>
+              {filteredProducts.length !== products.length
+                ? language === 'bn'
+                  ? `মোট ${products.length}টির মধ্যে ${filteredProducts.length}টি পণ্য প্রদর্শিত`
+                  : `Showing ${filteredProducts.length} of ${products.length} products`
+                : language === 'bn'
+                  ? `মোট ${filteredProducts.length}টি পণ্য প্রদর্শিত`
+                  : `Showing ${filteredProducts.length} products`}
+            </span>
+            {(filteredProducts.length !== products.length || isAnyFilterActive || activeTab !== 'all') && products.length > 0 && (
+              <button
+                type="button"
+                onClick={() => {
+                  resetAllFilters();
+                  setActiveTab('all');
+                }}
+                className="px-2 py-0.5 rounded bg-blue-50 hover:bg-blue-100 dark:bg-blue-950/60 dark:hover:bg-blue-900/60 text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-800 text-[11px] font-sans font-bold cursor-pointer transition-colors"
+              >
+                {language === 'bn' ? `সব দেখান (${products.length})` : `Show All (${products.length})`}
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* 6. Either 3 Columns Kanban Board (when expiry tab & columns mode) OR Products Table */}
+      {activeTab === 'expiry' && expiryViewMode === 'columns' ? (
+        <div className="space-y-6">
+          {/* Section 1: 🔴 Expired */}
+          {(expirySubFilter === 'expired' || expirySubFilter === 'all-dated') && (
+          <div className="bg-rose-50/40 dark:bg-rose-950/20 rounded-2xl border-2 border-rose-200 dark:border-rose-900/50 p-4">
+            <div className="flex items-center justify-between pb-3 mb-3 border-b border-rose-200 dark:border-rose-900/50">
+              <div className="flex items-center gap-2">
+                <span className="w-2.5 h-2.5 rounded-full bg-rose-500 animate-pulse" />
+                <div>
+                  <h3 className="font-bold text-sm text-rose-900 dark:text-rose-200">
+                    🔴 {language === 'bn' ? 'মেয়াদোত্তীর্ণ (Expired)' : 'Expired'}
+                  </h3>
+                  <p className="text-[10px] text-rose-700/80 dark:text-rose-400">
+                    {language === 'bn' ? 'মেয়াদ শেষ হয়ে যাওয়া স্টক' : 'Items past expiry date'}
+                  </p>
+                </div>
+              </div>
+              <span className="px-2.5 py-0.5 rounded-full text-xs font-mono font-bold bg-rose-600 text-white shadow-xs">
+                {filteredExpiredProducts.length}
+              </span>
+            </div>
+
+            {filteredExpiredProducts.length === 0 ? (
+              <div className="py-12 flex flex-col items-center justify-center text-center p-4 text-zinc-400">
+                <ShieldCheck className="w-10 h-10 text-rose-300 dark:text-rose-800 mb-2" />
+                <p className="text-xs font-semibold text-zinc-600 dark:text-zinc-400">
+                  {language === 'bn' ? 'কোনো মেয়াদোত্তীর্ণ পণ্য নেই!' : 'No expired items!'}
+                </p>
+                <p className="text-[10px] text-zinc-400 mt-0.5">
+                  {language === 'bn' ? 'সব পণ্য নিরাপদ ও বৈধ মেয়াদে রয়েছে' : 'All items have valid shelf life'}
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {filteredExpiredProducts.map(p => {
+                  const summary = productExpirySummaries.get(p.id) || getProductExpirySummary(p, 30);
+                  return (
+                    <div
+                      key={p.id}
+                      className="bg-white dark:bg-zinc-900 rounded-xl p-3.5 border border-rose-200 dark:border-rose-900/60 shadow-xs hover:shadow-md transition-all space-y-2.5"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="flex-1 min-w-0">
+                          <h4 className="font-bold text-xs text-zinc-900 dark:text-white leading-tight truncate">
+                            {p.name}
+                          </h4>
+                          {p.nameBn && <div className="text-[11px] text-zinc-500 truncate">{p.nameBn}</div>}
+                          <div className="text-[10px] text-zinc-400 font-mono mt-0.5">
+                            SKU: {p.sku} {p.batchNumber ? `• Batch: ${p.batchNumber}` : ''}
+                          </div>
+                        </div>
+                        <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-300 whitespace-nowrap">
+                          {formatStockWithUnit(p.stock, p)}
+                        </span>
+                      </div>
+
+                      {/* Expiry Badge */}
+                      <div className="p-2 rounded-lg bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900/60 flex items-center justify-between text-xs">
+                        <div className="flex items-center gap-1.5 text-rose-700 dark:text-rose-300 font-mono font-bold text-[11px]">
+                          <AlertTriangle className="w-3.5 h-3.5 text-rose-600 shrink-0" />
+                          <span>{summary.formattedDisplayDate || p.expDate}</span>
+                        </div>
+                        <span className="text-[10px] font-bold text-rose-600 dark:text-rose-400">
+                          {summary.minDaysRemaining !== null ? `${Math.abs(summary.minDaysRemaining)} দিন পূর্বে শেষ` : 'মেয়াদ শেষ'}
+                        </span>
+                      </div>
+
+                      {/* Action buttons */}
+                      <div className="flex items-center gap-1 pt-1 border-t border-zinc-100 dark:border-zinc-800">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setQuickDateProduct(p);
+                            setQuickDateValue(summary.formattedDisplayDate || p.expDate || '');
+                          }}
+                          className="flex-1 py-1.5 px-2 rounded-lg bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-950/50 dark:hover:bg-indigo-900/50 text-indigo-700 dark:text-indigo-300 text-[11px] font-bold flex items-center justify-center gap-1 transition-colors cursor-pointer"
+                          title={language === 'bn' ? 'মেয়াদ তারিখ পরিবর্তন করুন' : 'Change Expiry Date'}
+                        >
+                          <Calendar className="w-3 h-3" />
+                          <span>{language === 'bn' ? 'তারিখ পরিবর্তন' : 'Change Date'}</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setReplaceProduct(p)}
+                          className="py-1.5 px-2 rounded-lg bg-purple-50 hover:bg-purple-100 dark:bg-purple-950/50 dark:hover:bg-purple-900/50 text-purple-700 dark:text-purple-300 text-[11px] font-bold flex items-center justify-center gap-1 transition-colors cursor-pointer"
+                          title="রিপ্লেস বা ফ্রেশ ব্যাচ"
+                        >
+                          <RefreshCw className="w-3 h-3" />
+                          <span>{language === 'bn' ? 'রিপ্লেস' : 'Replace'}</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => onOpenEditModal(p)}
+                          className="p-1.5 hover:bg-zinc-100 dark:hover:bg-zinc-800 text-zinc-500 rounded-lg transition-colors cursor-pointer"
+                          title="পণ্য বিস্তারিত সম্পাদনা"
+                        >
+                          <Edit2 className="w-3 h-3" />
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+          )}
+
+          {/* Section 2: 🟡 Within 30 Days */}
+          {(expirySubFilter === 'expiring-soon' || expirySubFilter === 'all-dated') && (
+          <div className="bg-amber-50/40 dark:bg-amber-950/20 rounded-2xl border-2 border-amber-200 dark:border-amber-900/50 p-4">
+            <div className="flex items-center justify-between pb-3 mb-3 border-b border-amber-200 dark:border-amber-900/50">
+              <div className="flex items-center gap-2">
+                <span className="w-2.5 h-2.5 rounded-full bg-amber-500 animate-pulse" />
+                <div>
+                  <h3 className="font-bold text-sm text-amber-900 dark:text-amber-200">
+                    🟡 {language === 'bn' ? '৩০ দিনের মধ্যে শেষ (Within 30 Days)' : 'Within 30 Days'}
+                  </h3>
+                  <p className="text-[10px] text-amber-700/80 dark:text-amber-400">
+                    {language === 'bn' ? 'আসন্ন ৩০ দিনের মধ্যে মেয়াদ শেষ' : 'Expiring in under 30 days'}
+                  </p>
+                </div>
+              </div>
+              <span className="px-2.5 py-0.5 rounded-full text-xs font-mono font-bold bg-amber-600 text-white shadow-xs">
+                {filteredExpiringSoonProducts.length}
+              </span>
+            </div>
+
+            {filteredExpiringSoonProducts.length === 0 ? (
+              <div className="py-12 flex flex-col items-center justify-center text-center p-4 text-zinc-400">
+                <Clock className="w-10 h-10 text-amber-300 dark:text-amber-800 mb-2" />
+                <p className="text-xs font-semibold text-zinc-600 dark:text-zinc-400">
+                  {language === 'bn' ? '৩০ দিনের মধ্যে কোনো পণ্য মেয়াদোত্তীর্ণ হচ্ছে না!' : 'No items expiring soon!'}
+                </p>
+                <p className="text-[10px] text-zinc-400 mt-0.5">
+                  {language === 'bn' ? 'সব স্টক পর্যাপ্ত মেয়াদযুক্ত' : 'Safe stock expiry buffer'}
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {filteredExpiringSoonProducts.map(p => {
+                  const summary = productExpirySummaries.get(p.id) || getProductExpirySummary(p, 30);
+                  return (
+                    <div
+                      key={p.id}
+                      className="bg-white dark:bg-zinc-900 rounded-xl p-3.5 border border-amber-200 dark:border-amber-900/60 shadow-xs hover:shadow-md transition-all space-y-2.5"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="flex-1 min-w-0">
+                          <h4 className="font-bold text-xs text-zinc-900 dark:text-white leading-tight truncate">
+                            {p.name}
+                          </h4>
+                          {p.nameBn && <div className="text-[11px] text-zinc-500 truncate">{p.nameBn}</div>}
+                          <div className="text-[10px] text-zinc-400 font-mono mt-0.5">
+                            SKU: {p.sku} {p.batchNumber ? `• Batch: ${p.batchNumber}` : ''}
+                          </div>
+                        </div>
+                        <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300 whitespace-nowrap">
+                          {formatStockWithUnit(p.stock, p)}
+                        </span>
+                      </div>
+
+                      {/* Expiry Badge */}
+                      <div className="p-2 rounded-lg bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900/60 flex items-center justify-between text-xs">
+                        <div className="flex items-center gap-1.5 text-amber-700 dark:text-amber-300 font-mono font-bold text-[11px]">
+                          <Clock className="w-3.5 h-3.5 text-amber-600 animate-pulse shrink-0" />
+                          <span>{summary.formattedDisplayDate || p.expDate}</span>
+                        </div>
+                        <span className="text-[10px] font-bold text-amber-600 dark:text-amber-400">
+                          {summary.minDaysRemaining !== null ? `${summary.minDaysRemaining} দিন বাকি` : 'শীঘ্রই শেষ'}
+                        </span>
+                      </div>
+
+                      {/* Action buttons */}
+                      <div className="flex items-center gap-1 pt-1 border-t border-zinc-100 dark:border-zinc-800">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setQuickDateProduct(p);
+                            setQuickDateValue(summary.formattedDisplayDate || p.expDate || '');
+                          }}
+                          className="flex-1 py-1.5 px-2 rounded-lg bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-950/50 dark:hover:bg-indigo-900/50 text-indigo-700 dark:text-indigo-300 text-[11px] font-bold flex items-center justify-center gap-1 transition-colors cursor-pointer"
+                          title={language === 'bn' ? 'মেয়াদ তারিখ পরিবর্তন করুন' : 'Change Expiry Date'}
+                        >
+                          <Calendar className="w-3 h-3" />
+                          <span>{language === 'bn' ? 'তারিখ পরিবর্তন' : 'Change Date'}</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setReplaceProduct(p)}
+                          className="py-1.5 px-2 rounded-lg bg-purple-50 hover:bg-purple-100 dark:bg-purple-950/50 dark:hover:bg-purple-900/50 text-purple-700 dark:text-purple-300 text-[11px] font-bold flex items-center justify-center gap-1 transition-colors cursor-pointer"
+                          title="রিপ্লেস বা ফ্রেশ ব্যাচ"
+                        >
+                          <RefreshCw className="w-3 h-3" />
+                          <span>{language === 'bn' ? 'রিপ্লেস' : 'Replace'}</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => onOpenEditModal(p)}
+                          className="p-1.5 hover:bg-zinc-100 dark:hover:bg-zinc-800 text-zinc-500 rounded-lg transition-colors cursor-pointer"
+                          title="পণ্য বিস্তারিত সম্পাদনা"
+                        >
+                          <Edit2 className="w-3 h-3" />
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+          )}
+
+          {/* Section 3: 🟢 Fresh / Valid */}
+          {(expirySubFilter === 'fresh' || expirySubFilter === 'all-dated') && (
+          <div className="bg-emerald-50/40 dark:bg-emerald-950/20 rounded-2xl border-2 border-emerald-200 dark:border-emerald-900/50 p-4">
+            <div className="flex items-center justify-between pb-3 mb-3 border-b border-emerald-200 dark:border-emerald-900/50">
+              <div className="flex items-center gap-2">
+                <span className="w-2.5 h-2.5 rounded-full bg-emerald-500" />
+                <div>
+                  <h3 className="font-bold text-sm text-emerald-900 dark:text-emerald-200">
+                    🟢 {language === 'bn' ? 'সতেজ / বৈধ মেয়াদ (Fresh / Valid)' : 'Fresh / Valid'}
+                  </h3>
+                  <p className="text-[10px] text-emerald-700/80 dark:text-emerald-400">
+                    {language === 'bn' ? '৩০ দিনের বেশি দীর্ঘমেয়াদী স্টক' : 'Valid stock > 30 days'}
+                  </p>
+                </div>
+              </div>
+              <span className="px-2.5 py-0.5 rounded-full text-xs font-mono font-bold bg-emerald-600 text-white shadow-xs">
+                {filteredFreshDatedProducts.length}
+              </span>
+            </div>
+
+            {filteredFreshDatedProducts.length === 0 ? (
+              <div className="py-12 flex flex-col items-center justify-center text-center p-4 text-zinc-400">
+                <Package className="w-10 h-10 text-emerald-300 dark:text-emerald-800 mb-2" />
+                <p className="text-xs font-semibold text-zinc-600 dark:text-zinc-400">
+                  {language === 'bn' ? 'কোনো সতেজ পণ্য পাওয়া যায়নি!' : 'No fresh items found!'}
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {filteredFreshDatedProducts.map(p => {
+                  const summary = productExpirySummaries.get(p.id) || getProductExpirySummary(p, 30);
+                  return (
+                    <div
+                      key={p.id}
+                      className="bg-white dark:bg-zinc-900 rounded-xl p-3.5 border border-emerald-200 dark:border-emerald-900/60 shadow-xs hover:shadow-md transition-all space-y-2.5"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="flex-1 min-w-0">
+                          <h4 className="font-bold text-xs text-zinc-900 dark:text-white leading-tight truncate">
+                            {p.name}
+                          </h4>
+                          {p.nameBn && <div className="text-[11px] text-zinc-500 truncate">{p.nameBn}</div>}
+                          <div className="text-[10px] text-zinc-400 font-mono mt-0.5">
+                            SKU: {p.sku} {p.batchNumber ? `• Batch: ${p.batchNumber}` : ''}
+                          </div>
+                        </div>
+                        <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300 whitespace-nowrap">
+                          {formatStockWithUnit(p.stock, p)}
+                        </span>
+                      </div>
+
+                      {/* Expiry Badge */}
+                      <div className="p-2 rounded-lg bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-900/60 flex items-center justify-between text-xs">
+                        <div className="flex items-center gap-1.5 text-emerald-700 dark:text-emerald-300 font-mono font-bold text-[11px]">
+                          <Check className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                          <span>{summary.formattedDisplayDate || p.expDate}</span>
+                        </div>
+                        <span className="text-[10px] font-bold text-emerald-600 dark:text-emerald-400">
+                          {summary.minDaysRemaining !== null ? `${summary.minDaysRemaining} দিন বাকি (নিরাপদ)` : 'বৈধ'}
+                        </span>
+                      </div>
+
+                      {/* Action buttons */}
+                      <div className="flex items-center gap-1 pt-1 border-t border-zinc-100 dark:border-zinc-800">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setQuickDateProduct(p);
+                            setQuickDateValue(summary.formattedDisplayDate || p.expDate || '');
+                          }}
+                          className="flex-1 py-1.5 px-2 rounded-lg bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-950/50 dark:hover:bg-indigo-900/50 text-indigo-700 dark:text-indigo-300 text-[11px] font-bold flex items-center justify-center gap-1 transition-colors cursor-pointer"
+                          title={language === 'bn' ? 'মেয়াদ তারিখ পরিবর্তন করুন' : 'Change Expiry Date'}
+                        >
+                          <Calendar className="w-3 h-3" />
+                          <span>{language === 'bn' ? 'তারিখ পরিবর্তন' : 'Change Date'}</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => onOpenEditModal(p)}
+                          className="p-1.5 hover:bg-zinc-100 dark:hover:bg-zinc-800 text-zinc-500 rounded-lg transition-colors cursor-pointer"
+                          title="পণ্য বিস্তারিত সম্পাদনা"
+                        >
+                          <Edit2 className="w-3 h-3" />
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+          )}
+        </div>
+      ) : (
+      /* 6. Products Table or Logs Table */
+      <div className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-800 overflow-hidden shadow-xs">
+        <div className="overflow-x-auto">
+          {activeTab === 'return-logs' || activeTab === 'write-off-logs' || activeTab === 'replace-logs' ? (
+            <table className="w-full text-left text-xs">
+              <thead className="bg-zinc-50 dark:bg-zinc-850 text-zinc-500 dark:text-zinc-400 font-semibold border-b border-zinc-200 dark:border-zinc-800">
+                <tr>
+                  <th className="py-3 px-4 font-mono">Date</th>
+                  <th className="py-3 px-4">Action Type</th>
+                  <th className="py-3 px-4">Product Name & SKU</th>
+                  <th className="py-3 px-4 font-mono">Batch / PUR / Exp</th>
+                  <th className="py-3 px-4 text-center font-mono">Qty</th>
+                  <th className="py-3 px-4 text-right font-mono">Unit Cost</th>
+                  <th className="py-3 px-4 text-right font-mono">Total Value</th>
+                  <th className="py-3 px-4">Notes / Reason</th>
+                  <th className="py-3 px-4">{language === 'bn' ? 'এন্ট্রি কারী' : 'Entry By'}</th>
+                  <th className="py-3 px-4 text-center">Action</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
+                {filteredLogs.length === 0 ? (
+                  <tr>
+                    <td colSpan={10} className="py-12 text-center text-zinc-400">
+                      {activeTab === 'replace-logs'
+                        ? (language === 'bn' ? 'কোনো পণ্য প্রতিস্থাপনের (Replace) হিসাব পাওয়া যায়নি।' : 'No product replacement records found.')
+                        : activeTab === 'return-logs'
+                        ? (language === 'bn' ? 'কোনো মহাজনে ফেরত রেকর্ড পাওয়া যায়নি।' : 'No supplier return records found.')
+                        : (language === 'bn' ? 'কোনো নষ্ট / রাইট অফ রেকর্ড পাওয়া যায়নি।' : 'No write-off records found.')}
+                    </td>
+                  </tr>
+                ) : (
+                  filteredLogs.map(log => (
+                    <tr key={log.id} className="hover:bg-zinc-50 dark:hover:bg-zinc-800/40 transition-colors">
+                      <td className="py-3 px-4 font-mono text-zinc-500">{log.date}</td>
+                      <td className="py-3 px-4">
+                        <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                          log.actionType === 'RETURN_SUPPLIER'
+                            ? 'bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300'
+                            : log.actionType === 'REPLACEMENT'
+                            ? 'bg-purple-100 text-purple-800 dark:bg-purple-950 dark:text-purple-300'
+                            : 'bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-300'
+                        }`}>
+                          {log.actionType === 'RETURN_SUPPLIER'
+                            ? (language === 'bn' ? 'মহাজনে ফেরত' : 'Supplier Return')
+                            : log.actionType === 'REPLACEMENT'
+                            ? (language === 'bn' ? '🔄 পণ্য রিপ্লেসমেন্ট' : '🔄 Replaced')
+                            : (language === 'bn' ? 'নষ্ট / রাইট অফ' : 'Write Off')}
+                        </span>
+                      </td>
+                      <td className="py-3 px-4">
+                        <div className="font-bold text-zinc-900 dark:text-white">{log.productName}</div>
+                        <div className="text-[10px] text-zinc-400 font-mono">SKU: {log.sku}</div>
+                      </td>
+                      <td className="py-3 px-4 font-mono text-zinc-600 dark:text-zinc-300">
+                        <div>Batch: {log.batchNumber || 'N/A'}</div>
+                        {log.purchaseInvoiceNo && (
+                          <div className="text-[10px] text-indigo-600 dark:text-indigo-400 font-semibold">
+                            PUR: {log.purchaseInvoiceNo}
+                          </div>
+                        )}
+                        <div className="text-[10px] text-rose-600">Exp: {log.expDate || 'N/A'}</div>
+                      </td>
+                      <td className="py-3 px-4 text-center font-mono font-bold">
+                        {log.quantity} {log.unit}
+                      </td>
+                      <td className="py-3 px-4 text-right font-mono text-zinc-600 dark:text-zinc-300">
+                        {formatCurrency(log.purchasePrice)}
+                      </td>
+                      <td className="py-3 px-4 text-right font-mono font-bold text-rose-600">
+                        {formatCurrency(log.totalValue)}
+                      </td>
+                      <td className="py-3 px-4 text-zinc-600 dark:text-zinc-300 italic max-w-xs truncate">
+                        {log.notes || '—'}
+                      </td>
+                      <td className="py-3 px-4 text-zinc-600 dark:text-zinc-300">
+                        <MultiUserAuditTrail
+                          createdBy={log.createdBy}
+                          createdByName={getUserDisplayName(log.createdBy)}
+                          displayMode="table-cell"
+                        />
+                      </td>
+                      <td className="py-3 px-4 text-center">
+                        {currentUser?.role === 'ADMIN' && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (confirm(language === 'bn' ? 'এই রেকর্ডটি মুছে ফেলতে চান?' : 'Delete this record?')) {
+                                deleteExpiredReturnLog(log.id);
+                              }
+                            }}
+                            className="p-1.5 hover:bg-rose-50 dark:hover:bg-rose-950 text-rose-600 dark:text-rose-400 rounded transition-colors cursor-pointer"
+                            title="Delete Record"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          ) : (
+            <table className="min-w-full text-left text-xs divide-y divide-zinc-200 dark:divide-zinc-800">
+              <thead className="bg-zinc-50 dark:bg-zinc-850 text-zinc-600 dark:text-zinc-300 font-bold border-b border-zinc-200 dark:border-zinc-800">
+                <tr>
+                  <th className="py-3 px-3 w-12 whitespace-nowrap text-center font-mono">#</th>
+                  <th className="py-3 px-3 min-w-[170px] whitespace-nowrap">{language === 'bn' ? 'পণ্যের নাম' : 'Product Name'}</th>
+                  <th className="py-3 px-3 min-w-[105px] whitespace-nowrap font-mono">{language === 'bn' ? 'যোগের তারিখ' : 'Added Date'}</th>
+                  {isPharmacyMode && <th className="py-3 px-3 min-w-[110px] whitespace-nowrap">{language === 'bn' ? 'জেনেরিক' : 'Generic'}</th>}
+                  <th className="py-3 px-3 min-w-[130px] whitespace-nowrap">{language === 'bn' ? 'ব্র্যান্ড / কোম্পানি' : 'Brand / Company'}</th>
+                  {isPharmacyMode && <th className="py-3 px-3 min-w-[85px] whitespace-nowrap text-center font-mono">{language === 'bn' ? 'স্ট্রেংথ' : 'Strength'}</th>}
+                  {isPharmacyMode && <th className="py-3 px-3 min-w-[95px] whitespace-nowrap">{language === 'bn' ? 'ডোজ' : 'Dosage'}</th>}
+                  <th className="py-3 px-3 min-w-[110px] whitespace-nowrap">{language === 'bn' ? 'ক্যাটাগরি' : 'Category'}</th>
+                  <th className="py-3 px-3 min-w-[75px] whitespace-nowrap text-center font-mono">{language === 'bn' ? 'র‍্যাক' : 'Rack'}</th>
+                  <th className="py-3 px-3 min-w-[110px] whitespace-nowrap font-mono">{language === 'bn' ? 'বারকোড' : 'Barcode'}</th>
+                  <th className="py-3 px-3 min-w-[95px] whitespace-nowrap font-mono">{language === 'bn' ? 'ব্যাচ নং' : 'Batch No'}</th>
+                  <th className="py-3 px-3 min-w-[105px] whitespace-nowrap font-mono">{language === 'bn' ? 'মেয়াদ তারিখ' : 'Exp. Date'}</th>
+                  <th className="py-3 px-3 min-w-[90px] whitespace-nowrap text-right font-mono">{language === 'bn' ? 'ক্রয় দর' : 'Cost'}</th>
+                  <th className="py-3 px-3 min-w-[90px] whitespace-nowrap text-right font-mono">{language === 'bn' ? 'বিক্রয় দর' : 'Sales'}</th>
+                  <th className="py-3 px-3 min-w-[95px] whitespace-nowrap text-center font-mono">{language === 'bn' ? 'স্টক' : 'Stock'}</th>
+                  <th className="py-3 px-3 min-w-[110px] whitespace-nowrap text-right font-mono">{language === 'bn' ? 'মোট মজুদ মান' : 'Total Asset'}</th>
+                  <th className="py-3 px-3 min-w-[140px] whitespace-nowrap text-center">{language === 'bn' ? 'অ্যাকশন' : 'Actions'}</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
+                {filteredProducts.length === 0 ? (
+                  <tr>
+                    <td colSpan={isPharmacyMode ? 17 : 14} className="py-12 text-center text-zinc-400">
+                      <div className="flex flex-col items-center justify-center gap-2">
+                        <span>
+                          {language === 'bn' ? 'নির্বাচিত ফিল্টারে কোনো পণ্য পাওয়া যায়নি।' : 'No products found for the selected filters.'}
+                        </span>
+                        {products.length > 0 && (isAnyFilterActive || activeTab !== 'all') && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              resetAllFilters();
+                              setActiveTab('all');
+                            }}
+                            className="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold cursor-pointer transition-colors"
+                          >
+                            {language === 'bn'
+                              ? `ফিল্টার রিসেট করে সকল (${products.length}টি) পণ্য দেখান`
+                              : `Reset Filters & Show All (${products.length}) Products`}
+                          </button>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                ) : (
+                  paginatedProducts.map((p, idx) => {
+                    const actualPage = Math.min(currentPage, totalPages);
+                    const rowNumber = (itemsPerPage === 'ALL' ? 0 : (actualPage - 1) * Number(itemsPerPage)) + idx + 1;
+                    const marginPct =
+                      p.salesPrice > 0
+                        ? (((p.salesPrice - p.purchasePrice) / p.salesPrice) * 100).toFixed(1)
+                        : '0';
+                    const isLow = Number(p.stock || 0) <= Number(p.reorderLevel ?? 0);
+                    const summary = productExpirySummaries.get(p.id) || getProductExpirySummary(p, 30);
+                    const itemExpired = summary.hasExpired;
+                    const itemExpiringSoon = summary.hasExpiringSoon;
+                    const itemFresh = summary.hasFresh;
+                    const lineValuation = Number(p.stock || 0) * Number(p.purchasePrice || 0);
+                    const resolvedCategory = resolveProductCategoryName(p, categories);
+                    const combinedBatchNo = Array.from(
+                      new Set([
+                        ...(p.batchNumber && String(p.batchNumber).trim() ? [String(p.batchNumber).trim()] : []),
+                        ...((p.batches || [])
+                          .map(b => (b?.batchNumber ? String(b.batchNumber).trim() : ''))
+                          .filter(Boolean)),
+                      ])
+                    ).join(', ');
+
+                    return (
+                      <tr
+                        key={p.id}
+                        className={`hover:bg-zinc-50 dark:hover:bg-zinc-800/40 transition-colors ${
+                          itemExpired
+                            ? 'bg-rose-50/40 dark:bg-rose-950/20'
+                            : itemExpiringSoon
+                            ? 'bg-amber-50/30 dark:bg-amber-950/10'
+                            : ''
+                        }`}
+                      >
+                        {/* 0. Serial Number */}
+                        <td className="py-3 px-3 whitespace-nowrap text-center font-mono text-[11px] font-semibold text-zinc-400">
+                          {rowNumber}
+                        </td>
+
+                        {/* 1. Item Name and SKU */}
+                        <td className="py-3 px-3 whitespace-nowrap">
+                          <div className="flex items-center gap-2.5">
+                            {p.imageUrl || p.image ? (
+                              <img src={p.imageUrl || p.image} alt="" className="w-8 h-8 rounded-lg object-cover border border-slate-200 dark:border-slate-700 shrink-0" />
+                            ) : (
+                              <div className="w-8 h-8 rounded-lg bg-slate-100 dark:bg-slate-800 flex items-center justify-center text-slate-400 shrink-0 border border-slate-200 dark:border-slate-700">
+                                <Package className="w-4 h-4" />
+                              </div>
+                            )}
+                            <div>
+                              <div className="font-bold text-zinc-900 dark:text-white">
+                                <span>{p.name}</span>
+                              </div>
+                              {p.sku && <div className="text-[10px] text-zinc-400 font-mono">SKU: {p.sku}</div>}
+                              {p.nameBn && <div className="text-[10px] text-zinc-500">{p.nameBn}</div>}
+                            </div>
+                          </div>
+                        </td>
+
+                        {/* 2. Created / Added Date */}
+                        <td className="py-3 px-3 whitespace-nowrap font-mono text-zinc-600 dark:text-zinc-400">
+                          {p.createdAt ? (
+                            <span className="inline-flex items-center gap-1 text-[11px] bg-zinc-100 dark:bg-zinc-800 px-1.5 py-0.5 rounded font-mono">
+                              {p.createdAt.substring(0, 10)}
+                            </span>
+                          ) : (
+                            <span className="text-zinc-400 text-[11px]">N/A</span>
+                          )}
+                        </td>
+
+                        {/* 3. Generic (Pharmacy only) */}
+                        {isPharmacyMode && (
+                          <td className="py-3 px-3 whitespace-nowrap text-zinc-700 dark:text-zinc-300 font-medium">
+                            {p.generic || '—'}
+                          </td>
+                        )}
+
+                        {/* 4. Brand / Manufacturer */}
+                        <td className="py-3 px-3 whitespace-nowrap text-zinc-700 dark:text-zinc-300 font-medium">
+                          {p.manufacturer || '—'}
+                        </td>
+
+                        {/* 5. Strength (Pharmacy only) */}
+                        {isPharmacyMode && (
+                          <td className="py-3 px-3 whitespace-nowrap font-mono font-bold text-blue-700 dark:text-blue-300 text-center">
+                             {p.strength || '—'}
+                          </td>
+                        )}
+
+                        {/* 6. Dosage Form & Schedule (Pharmacy only) */}
+                        {isPharmacyMode && (
+                          <td className="py-3 px-3 whitespace-nowrap text-zinc-700 dark:text-zinc-300">
+                            {p.dosageForm || '—'}
+                          </td>
+                        )}
+
+                        {/* 7. Category */}
+                        <td className="py-3 px-3 whitespace-nowrap text-zinc-600 dark:text-zinc-300">
+                          {resolvedCategory}
+                        </td>
+
+                        {/* 8. Rack Location */}
+                        <td className="py-3 px-3 whitespace-nowrap font-mono text-xs text-center font-bold text-zinc-700 dark:text-zinc-300">
+                          {p.rackLocation || '—'}
+                        </td>
+
+                        {/* 9. Barcode */}
+                        <td className="py-3 px-3 whitespace-nowrap font-mono text-zinc-600 dark:text-zinc-400">
+                          {p.barcode || '—'}
+                        </td>
+
+                        {/* 10. Batch Number */}
+                        <td className="py-3 px-3 whitespace-nowrap font-mono text-zinc-700 dark:text-zinc-300">
+                          {combinedBatchNo || 'N/A'}
+                        </td>
+
+                        {/* 11. Expiry Date */}
+                        <td className="py-3 px-3 whitespace-nowrap font-mono">
+                          <span className={`px-1.5 py-0.5 rounded text-[11px] font-bold ${
+                            itemExpired
+                              ? 'bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-300'
+                              : itemExpiringSoon
+                              ? 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300'
+                              : 'text-zinc-700 dark:text-zinc-300'
+                          }`}>
+                            {summary.formattedDisplayDate || p.expDate || 'N/A'}
+                          </span>
+                        </td>
+
+                        {/* 12. Cost Price */}
+                        <td className="py-3 px-3 whitespace-nowrap text-right font-mono text-zinc-600 dark:text-zinc-300">
+                          {formatCurrency(p.purchasePrice)}
+                        </td>
+
+                        {/* 13. Sales Price */}
+                        <td className="py-3 px-3 whitespace-nowrap text-right font-mono font-bold text-emerald-600 dark:text-emerald-400">
+                          {formatCurrency(p.salesPrice)}
+                        </td>
+
+                        {/* 14. Stock Quantity */}
+                        <td className="py-3 px-3 whitespace-nowrap text-center">
+                          <span
+                            className={`inline-flex items-center px-2 py-0.5 rounded-full font-mono font-bold text-xs ${
+                              p.stock <= 0
+                                ? 'bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-300'
+                                : isLow
+                                ? 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300 animate-pulse'
+                                : 'bg-zinc-100 text-zinc-800 dark:bg-zinc-800 dark:text-zinc-200'
+                            }`}
+                          >
+                            {formatCleanNumber(Number(p.stock || 0))} {p.unit || 'Pcs'}
+                          </span>
+                          {hasDualUnit(p) && (
+                            <div className="text-[10px] font-mono text-indigo-600 dark:text-indigo-400 mt-0.5">
+                              {formatCartonBreakdown(p.stock, p) ||
+                                `1 ${p.purchaseUnit} = ${formatCleanNumber(p.unitConversion || 1)} ${p.unit}`}
+                            </div>
+                          )}
+                        </td>
+
+                        {/* 15. Total Cost Valuation */}
+                        <td className="py-3 px-3 whitespace-nowrap text-right font-mono font-bold text-zinc-900 dark:text-white">
+                          {formatCurrency(lineValuation)}
+                        </td>
+
+                        {/* 16. Actions */}
+                        <td className="py-3 px-3 whitespace-nowrap text-center">
+                          <div className="flex items-center justify-center gap-1">
+                            <button
+                              type="button"
+                              onClick={() => setBatchProduct(p)}
+                              title={language === 'bn' ? 'ব্যাচ ও মেয়াদ পরিচালনা' : 'Manage Batches & Expiry Dates'}
+                              className="p-1.5 hover:bg-indigo-50 dark:hover:bg-indigo-950 text-indigo-600 dark:text-indigo-400 rounded transition-colors cursor-pointer"
+                            >
+                              <Boxes className="w-3.5 h-3.5" />
+                            </button>
+                            {p.expDate && (
+                              <button
+                                type="button"
+                                onClick={() => setReplaceProduct(p)}
+                                title={language === 'bn' ? 'মেয়াদোত্তীর্ণ পণ্য প্রতিস্থাপন / রিপ্লেস (Replace)' : 'Replace Exp Date Product'}
+                                className={`p-1.5 rounded transition-all cursor-pointer flex items-center gap-1 ${
+                                  itemExpired && p.stock > 0
+                                    ? 'bg-purple-600 hover:bg-purple-700 text-white font-bold px-2 py-1 shadow-xs'
+                                    : 'hover:bg-purple-50 dark:hover:bg-purple-950 text-purple-600 dark:text-purple-400'
+                                }`}
+                              >
+                                <RefreshCw className="w-3.5 h-3.5" />
+                                {itemExpired && p.stock > 0 && (
+                                  <span className="text-[10px] hidden sm:inline">
+                                    {language === 'bn' ? 'রিপ্লেস' : 'Replace'}
+                                  </span>
+                                )}
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => setBarcodeProduct(p)}
+                              title="Generate Barcode Sticker"
+                              className="p-1.5 hover:bg-zinc-100 dark:hover:bg-zinc-800 text-zinc-600 dark:text-zinc-300 rounded transition-colors cursor-pointer"
+                            >
+                              <Barcode className="w-3.5 h-3.5" />
+                            </button>
+                            {hasEditPermission && (
+                              <button
+                                type="button"
+                                onClick={() => onOpenEditModal(p)}
+                                title="Edit Product"
+                                className="p-1.5 hover:bg-zinc-100 dark:hover:bg-zinc-800 text-zinc-600 dark:text-zinc-300 rounded transition-colors cursor-pointer"
+                              >
+                                <Edit2 className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+                            {hasDeletePermission && (
+                              <button
+                                type="button"
+                                onClick={() => handleDelete(p)}
+                                title="Delete Product"
+                                className="p-1.5 hover:bg-rose-50 dark:hover:bg-rose-950 text-rose-600 dark:text-rose-400 rounded transition-colors cursor-pointer"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
+              </tbody>
+              </table>
+            )}
+        </div>
+
+        {/* Pagination Controls Footer */}
+        {activeTab !== 'return-logs' && activeTab !== 'write-off-logs' && activeTab !== 'replace-logs' && filteredProducts.length > 0 && (
+          <div className="flex flex-col sm:flex-row items-center justify-between gap-3 px-4 py-3 bg-zinc-50 dark:bg-zinc-850 border-t border-zinc-200 dark:border-zinc-800 text-xs">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-zinc-500">
+                {language === 'bn' ? 'প্রতি পেজে প্রদর্শন:' : 'Items per page:'}
+              </span>
+              <select
+                value={String(itemsPerPage)}
+                onChange={e => {
+                  const val = e.target.value;
+                  setItemsPerPage(val === 'ALL' ? 'ALL' : Number(val));
+                  setCurrentPage(1);
+                }}
+                className="px-2.5 py-1 bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg text-xs font-semibold text-zinc-800 dark:text-zinc-200 cursor-pointer"
+              >
+                <option value="10">10</option>
+                <option value="25">25</option>
+                <option value="50">50</option>
+                <option value="100">100</option>
+                <option value="ALL">{language === 'bn' ? 'সব (All)' : 'All'}</option>
+              </select>
+              <span className="text-zinc-500 font-mono">
+                {(() => {
+                  const actualPage = Math.min(currentPage, totalPages);
+                  const startIndex = filteredProducts.length === 0 ? 0 : (actualPage - 1) * (itemsPerPage === 'ALL' ? filteredProducts.length : Number(itemsPerPage)) + 1;
+                  const endIndex = itemsPerPage === 'ALL' ? filteredProducts.length : Math.min(filteredProducts.length, actualPage * Number(itemsPerPage));
+                  return language === 'bn'
+                    ? `মোট ${filteredProducts.length}টি পণ্যের মধ্যে ${startIndex} - ${endIndex} প্রদর্শিত`
+                    : `Showing ${startIndex} to ${endIndex} of ${filteredProducts.length} entries`;
+                })()}
+              </span>
+            </div>
+
+            {itemsPerPage !== 'ALL' && totalPages > 1 && (
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  disabled={currentPage <= 1}
+                  onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))}
+                  className="px-3 py-1 bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg hover:bg-zinc-100 dark:hover:bg-zinc-700 disabled:opacity-50 disabled:cursor-not-allowed font-semibold cursor-pointer transition-colors"
+                >
+                  {language === 'bn' ? 'পূর্ববর্তী' : 'Previous'}
+                </button>
+                <span className="px-3 py-1 font-mono font-bold text-zinc-700 dark:text-zinc-300">
+                  {Math.min(currentPage, totalPages)} / {totalPages}
+                </span>
+                <button
+                  type="button"
+                  disabled={currentPage >= totalPages}
+                  onClick={() => setCurrentPage(prev => Math.min(totalPages, prev + 1))}
+                  className="px-3 py-1 bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg hover:bg-zinc-100 dark:hover:bg-zinc-700 disabled:opacity-50 disabled:cursor-not-allowed font-semibold cursor-pointer transition-colors"
+                >
+                  {language === 'bn' ? 'পরবর্তী' : 'Next'}
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+      )}
+      </>
+      )}
+
+      {/* Barcode Sticker Generator Sub-Modal */}
+      {barcodeProduct && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-2xs p-4">
+          <div className="w-full max-w-sm bg-white dark:bg-zinc-900 rounded-xl shadow-2xl border border-zinc-200 dark:border-zinc-800 p-5 space-y-4 text-xs">
+            <h3 className="font-bold text-sm text-zinc-900 dark:text-white flex items-center gap-2">
+              <Barcode className="w-4 h-4 text-emerald-600" />
+              <span>{language === 'bn' ? 'বারকোড স্টিকার লেবেল প্রিন্ট' : 'Print Barcode Label Sheet'}</span>
+            </h3>
+
+            <div className="p-3 bg-zinc-50 dark:bg-zinc-850 rounded-lg">
+              <div className="font-bold text-zinc-900 dark:text-white">{barcodeProduct.name}</div>
+              <div className="text-zinc-500 font-mono mt-0.5">Code: {barcodeProduct.barcode} • {formatCurrency(barcodeProduct.salesPrice)}</div>
+            </div>
+
+            <div>
+              <label className="font-semibold block mb-1">{language === 'bn' ? 'স্টিকার সংখ্যা:' : 'Number of Barcode Stickers to Print:'}</label>
+              <input
+                type="number"
+                min="1"
+                max="100"
+                value={barcodeCount}
+                onChange={e => setBarcodeCount(parseInt(e.target.value) || 1)}
+                className="w-full p-2 bg-zinc-50 dark:bg-zinc-800 border rounded-lg font-mono font-bold"
+              />
+            </div>
+
+            <div className="flex justify-end gap-2 pt-2 border-t">
+              <button
+                type="button"
+                onClick={() => setBarcodeProduct(null)}
+                className="px-3 py-1.5 bg-zinc-100 dark:bg-zinc-800 rounded-lg cursor-pointer"
+              >
+                {language === 'bn' ? 'বাতিল' : 'Cancel'}
+              </button>
+              <button
+                type="button"
+                onClick={handlePrintBarcodes}
+                className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-lg flex items-center gap-1.5 cursor-pointer"
+              >
+                <Printer className="w-3.5 h-3.5" />
+                <span>{language === 'bn' ? 'প্রিন্ট প্রিভিউ দেখুন' : 'Generate Print Preview'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {replaceProduct && (
+        <ReplaceProductModal
+          product={replaceProduct}
+          onClose={() => setReplaceProduct(null)}
+        />
+      )}
+
+      {batchProduct && (
+        <BatchManagementModal
+          product={batchProduct}
+          onClose={() => setBatchProduct(null)}
+        />
+      )}
+
+      {showImportModal && (
+        <ProductImportModal
+          onClose={() => setShowImportModal(false)}
+        />
+      )}
+
+      <CameraBarcodeScannerModal
+        isOpen={isCameraScannerOpen}
+        onClose={() => setIsCameraScannerOpen(false)}
+        onBarcodeDetected={(code) => {
+          setSearch(code);
+          setIsCameraScannerOpen(false);
+          showToast(language === 'bn' ? `বারকোড স্ক্যান সফল: ${code}` : `Barcode scanned: ${code}`, 'success');
+        }}
+        products={products}
+      />
+
+      {/* Quick Expiry Date Editor Modal */}
+      {quickDateProduct && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-2xs p-3">
+          <div className="w-full max-w-md bg-white dark:bg-zinc-900 rounded-2xl shadow-2xl border border-zinc-200 dark:border-zinc-800 p-5 animate-in fade-in zoom-in-95 duration-200">
+            <div className="flex items-center justify-between pb-3 border-b border-zinc-100 dark:border-zinc-800">
+              <div className="flex items-center gap-2">
+                <Calendar className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />
+                <h3 className="font-bold text-sm text-zinc-900 dark:text-white">
+                  {language === 'bn' ? 'মেয়াদ তারিখ পরিবর্তন (Quick Update Expiry)' : 'Change Expiry Date'}
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setQuickDateProduct(null)}
+                className="p-1 rounded-lg hover:bg-zinc-100 dark:hover:bg-zinc-800 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="py-4 space-y-3">
+              <div className="bg-zinc-50 dark:bg-zinc-850 p-3 rounded-xl border border-zinc-200 dark:border-zinc-800">
+                <div className="font-bold text-sm text-zinc-900 dark:text-white">{quickDateProduct.name}</div>
+                {quickDateProduct.nameBn && <div className="text-xs text-zinc-500">{quickDateProduct.nameBn}</div>}
+                <div className="text-xs text-zinc-500 font-mono mt-1">
+                  SKU: {quickDateProduct.sku} {quickDateProduct.batchNumber ? `• Batch: ${quickDateProduct.batchNumber}` : ''} • Stock: {formatStockWithUnit(quickDateProduct.stock, quickDateProduct)}
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-zinc-700 dark:text-zinc-300 mb-1">
+                  {language === 'bn' ? 'নতুন মেয়াদ তারিখ নির্বাচন করুন:' : 'Select New Expiry Date:'}
+                </label>
+                <input
+                  type="date"
+                  value={quickDateValue}
+                  onChange={e => setQuickDateValue(e.target.value)}
+                  className="w-full px-3 py-2 text-sm bg-white dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700 rounded-xl focus:ring-2 focus:ring-indigo-500 font-mono"
+                />
+              </div>
+
+              {/* Quick Preset Buttons */}
+              <div className="space-y-1.5 pt-1">
+                <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider block">
+                  {language === 'bn' ? 'দ্রুত শর্টকাট প্রিসেট:' : 'Quick Presets:'}
+                </span>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const d = new Date();
+                      d.setDate(d.getDate() - 5);
+                      setQuickDateValue(d.toISOString().split('T')[0]);
+                    }}
+                    className="px-2 py-1.5 text-[11px] font-bold rounded-lg bg-rose-50 dark:bg-rose-950/40 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-800 hover:bg-rose-100 text-center cursor-pointer"
+                  >
+                    🔴 Expired (-5d)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const d = new Date();
+                      d.setDate(d.getDate() + 15);
+                      setQuickDateValue(d.toISOString().split('T')[0]);
+                    }}
+                    className="px-2 py-1.5 text-[11px] font-bold rounded-lg bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300 border border-amber-200 dark:border-amber-800 hover:bg-amber-100 text-center cursor-pointer"
+                  >
+                    🟡 Within 30d (+15d)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const d = new Date();
+                      d.setMonth(d.getMonth() + 6);
+                      setQuickDateValue(d.toISOString().split('T')[0]);
+                    }}
+                    className="px-2 py-1.5 text-[11px] font-bold rounded-lg bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 hover:bg-emerald-100 text-center cursor-pointer"
+                  >
+                    🟢 Fresh (+6 Mo)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const d = new Date();
+                      d.setFullYear(d.getFullYear() + 1);
+                      setQuickDateValue(d.toISOString().split('T')[0]);
+                    }}
+                    className="px-2 py-1.5 text-[11px] font-bold rounded-lg bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 hover:bg-emerald-100 text-center cursor-pointer"
+                  >
+                    🟢 Fresh (+1 Yr)
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-3 border-t border-zinc-100 dark:border-zinc-800">
+              <button
+                type="button"
+                onClick={() => setQuickDateProduct(null)}
+                className="px-4 py-2 text-xs font-bold rounded-xl text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
+              >
+                {language === 'bn' ? 'বাতিল' : 'Cancel'}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (!quickDateValue) {
+                    showToast(language === 'bn' ? 'দয়া করে একটি তারিখ নির্বাচন করুন' : 'Please select a date', 'error');
+                    return;
+                  }
+                  updateProduct(quickDateProduct.id, { expDate: quickDateValue });
+                  showToast(
+                    language === 'bn'
+                      ? `"${quickDateProduct.name}"-এর মেয়াদ তারিখ সফলভাবে পরিবর্তন করা হয়েছে!`
+                      : `Expiry date for "${quickDateProduct.name}" updated successfully!`,
+                    'success'
+                  );
+                  setQuickDateProduct(null);
+                }}
+                className="px-4 py-2 text-xs font-bold rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white shadow-sm flex items-center gap-1.5 transition-colors cursor-pointer"
+              >
+                <Check className="w-3.5 h-3.5" />
+                <span>{language === 'bn' ? 'তারিখ আপডেট করুন' : 'Update Expiry Date'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};

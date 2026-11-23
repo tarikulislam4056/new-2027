@@ -1,0 +1,18 @@
+node_modules/
+build/
+# dist/  (Allowed so compiled production build can be pushed to GitHub & deployed to cPanel)
+coverage/
+.DS_Store
+*.log
+.env*
+!.env.example
+.archive/
+*.patch
+
+# Live server persistent storage & credentials (never overwrite on deploy)
+erp_storage/
+public/erp_storage/
+dokanpro_erp_data/
+db_config.php
+erp_storage/db_config.php
+
