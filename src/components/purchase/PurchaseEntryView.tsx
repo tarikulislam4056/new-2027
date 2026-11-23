@@ -113,6 +113,8 @@ export const PurchaseEntryView: React.FC<PurchaseEntryViewProps> = ({
 
   // Top Controls: Cash vs Credit Toggle
   const [purchaseMode, setPurchaseMode] = useState<'CASH' | 'CREDIT'>(initialData?.dueAmount ? 'CREDIT' : 'CASH');
+  const isSubmittingRef = useRef(false);
+  const [isSaving, setIsSaving] = useState(false);
 
   // Supplier / Party Selection
   const suppliers = useMemo(() => parties.filter(p => p.type === 'SUPPLIER'), [parties]);
@@ -122,8 +124,8 @@ export const PurchaseEntryView: React.FC<PurchaseEntryViewProps> = ({
 
   // Invoice / Challan Meta
   const [invoiceNo, setInvoiceNo] = useState<string>(() => {
-    if (initialData?.supplierInvoiceNo) return initialData.supplierInvoiceNo;
     if (initialData?.billNumber) return initialData.billNumber;
+    if (initialData?.supplierInvoiceNo) return initialData.supplierInvoiceNo;
     return getNextPurchaseBillNumber ? getNextPurchaseBillNumber() : 'PUR-2026-0001';
   });
 
@@ -717,14 +719,24 @@ export const PurchaseEntryView: React.FC<PurchaseEntryViewProps> = ({
 
   // Submit Save Purchase
   const handleSavePurchase = (isSaveAndNew = false) => {
+    if (isSubmittingRef.current) return;
+    isSubmittingRef.current = true;
+    setIsSaving(true);
+    const releaseSubmitting = () => {
+      isSubmittingRef.current = false;
+      setIsSaving(false);
+    };
+
     if (!selectedSupplierId) {
       showToast(language === 'bn' ? 'সাপ্লায়ার / মহাজন নির্বাচন করুন!' : 'Please select a supplier!', 'warning');
+      releaseSubmitting();
       return;
     }
 
     const validItems = items.filter(i => i.productId && i.quantity > 0);
     if (validItems.length === 0) {
       showToast(language === 'bn' ? 'অন্তত একটি পণ্য নির্বাচন করুন!' : 'Please add at least one product!', 'warning');
+      releaseSubmitting();
       return;
     }
 
@@ -736,6 +748,7 @@ export const PurchaseEntryView: React.FC<PurchaseEntryViewProps> = ({
           : `This Invoice No is already entered previously! (${duplicatePurchase.supplierName} - #${duplicatePurchase.billNumber}). Duplicate entry not allowed.`,
         'error'
       );
+      releaseSubmitting();
       return;
     }
 
@@ -759,6 +772,7 @@ export const PurchaseEntryView: React.FC<PurchaseEntryViewProps> = ({
                 : `Insufficient balance in "${splitWallet?.name || 'wallet'}"! Available: ৳${effectiveWalletBal.toLocaleString()} | Trying to pay: ৳${split.amount.toLocaleString()}. Please choose another wallet or save as credit.`,
               'error'
             );
+            releaseSubmitting();
             return;
           }
         }
@@ -808,7 +822,10 @@ export const PurchaseEntryView: React.FC<PurchaseEntryViewProps> = ({
       ? updatePurchaseInvoice(initialData.id, payload)
       : createPurchaseInvoice(payload);
 
-    if (!savedPurchase) return;
+    if (!savedPurchase) {
+      releaseSubmitting();
+      return;
+    }
 
     try {
       confetti({
@@ -838,6 +855,7 @@ export const PurchaseEntryView: React.FC<PurchaseEntryViewProps> = ({
     }
 
     handleResetForm();
+    releaseSubmitting();
   };
 
   return (
@@ -1853,8 +1871,9 @@ export const PurchaseEntryView: React.FC<PurchaseEntryViewProps> = ({
           {!initialData && (
             <button
               type="button"
+              disabled={isSaving}
               onClick={() => handleSavePurchase(true)}
-              className="px-6 py-2.5 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 border border-[#DCD6FE] dark:border-slate-600 text-slate-700 dark:text-slate-200 rounded-xl text-xs sm:text-sm font-bold shadow-2xs transition-all cursor-pointer"
+              className="px-6 py-2.5 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 border border-[#DCD6FE] dark:border-slate-600 text-slate-700 dark:text-slate-200 rounded-xl text-xs sm:text-sm font-bold shadow-2xs transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
             >
               Save and New
             </button>
@@ -1863,8 +1882,9 @@ export const PurchaseEntryView: React.FC<PurchaseEntryViewProps> = ({
           {/* Save Button (Vibrant Purple Pill Button) */}
           <button
             type="button"
+            disabled={isSaving}
             onClick={() => handleSavePurchase(false)}
-            className={`px-8 py-2.5 ${initialData ? 'bg-amber-600 hover:bg-amber-700 active:bg-amber-800' : 'bg-[#8A7CFA] hover:bg-[#7868F7] active:bg-[#6856E8]'} text-white rounded-xl text-xs sm:text-sm font-bold shadow-xs transition-all cursor-pointer flex items-center gap-2`}
+            className={`px-8 py-2.5 ${initialData ? 'bg-amber-600 hover:bg-amber-700 active:bg-amber-800' : 'bg-[#8A7CFA] hover:bg-[#7868F7] active:bg-[#6856E8]'} text-white rounded-xl text-xs sm:text-sm font-bold shadow-xs transition-all cursor-pointer flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed`}
           >
             {initialData ? <Check className="w-4 h-4" /> : <Printer className="w-4 h-4" />}
             <span>{initialData ? 'Update Purchase' : 'Save & Print Bill'}</span>

@@ -166,6 +166,104 @@ export const mergeEntitiesById = <T extends { id?: string | number }>(localArr: 
   return Array.from(map.values());
 };
 
+export const dedupeById = <T extends { id?: string | number }>(arr: T[]): T[] => {
+  if (!Array.isArray(arr)) return [];
+  const seen = new Set<string>();
+  const result: T[] = [];
+  for (const item of arr) {
+    if (!item || item.id === undefined || item.id === null) continue;
+    const key = String(item.id);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(item);
+  }
+  return result;
+};
+
+export const dedupeTransactionDayBookEntries = (
+  entries: DayBookEntry[],
+  sales: SaleInvoice[],
+  purchases: PurchaseInvoice[]
+): { cleaned: DayBookEntry[]; removedIds: string[] } => {
+  const uniqueEntries = dedupeById(entries);
+  const removedIds: string[] = [];
+
+  const saleById = new Map<string, SaleInvoice>();
+  const saleByNo = new Map<string, SaleInvoice>();
+  for (const s of sales) {
+    saleById.set(s.id, s);
+    if (s.invoiceNumber) saleByNo.set(s.invoiceNumber.trim().toLowerCase(), s);
+  }
+
+  const purchaseById = new Map<string, PurchaseInvoice>();
+  const purchaseByNo = new Map<string, PurchaseInvoice>();
+  for (const p of purchases) {
+    purchaseById.set(p.id, p);
+    if (p.billNumber) purchaseByNo.set(p.billNumber.trim().toLowerCase(), p);
+    if (p.supplierInvoiceNo) purchaseByNo.set(p.supplierInvoiceNo.trim().toLowerCase(), p);
+  }
+
+  const seenSaleRef = new Set<string>();
+  const seenPurchaseRef = new Set<string>();
+  const cleaned: DayBookEntry[] = [];
+
+  for (const entry of uniqueEntries) {
+    if (entry.type === 'SALE') {
+      const vNo = (entry.voucherNo || '').trim().toLowerCase();
+      const rNo = (entry.referenceNo || '').trim().toLowerCase();
+      const idFromSynth = entry.id.startsWith('db-sale-') ? entry.id.slice('db-sale-'.length) : undefined;
+      const matchedSale =
+        (entry.referenceId ? saleById.get(entry.referenceId) : undefined) ||
+        (idFromSynth ? saleById.get(idFromSynth) : undefined) ||
+        (vNo ? saleByNo.get(vNo) : undefined) ||
+        (rNo ? saleByNo.get(rNo) : undefined);
+
+      if (matchedSale) {
+        if (seenSaleRef.has(matchedSale.id)) {
+          removedIds.push(entry.id);
+          continue;
+        }
+        seenSaleRef.add(matchedSale.id);
+        cleaned.push({
+          ...entry,
+          referenceId: matchedSale.id,
+          voucherNo: matchedSale.invoiceNumber,
+          referenceNo: matchedSale.invoiceNumber,
+        });
+        continue;
+      }
+    } else if (entry.type === 'PURCHASE') {
+      const vNo = (entry.voucherNo || '').trim().toLowerCase();
+      const rNo = (entry.referenceNo || '').trim().toLowerCase();
+      const idFromSynth = entry.id.startsWith('db-pur-') ? entry.id.slice('db-pur-'.length) : undefined;
+      const matchedPurchase =
+        (entry.referenceId ? purchaseById.get(entry.referenceId) : undefined) ||
+        (idFromSynth ? purchaseById.get(idFromSynth) : undefined) ||
+        (vNo ? purchaseByNo.get(vNo) : undefined) ||
+        (rNo ? purchaseByNo.get(rNo) : undefined);
+
+      if (matchedPurchase) {
+        if (seenPurchaseRef.has(matchedPurchase.id)) {
+          removedIds.push(entry.id);
+          continue;
+        }
+        seenPurchaseRef.add(matchedPurchase.id);
+        cleaned.push({
+          ...entry,
+          referenceId: matchedPurchase.id,
+          voucherNo: matchedPurchase.billNumber,
+          referenceNo: matchedPurchase.billNumber,
+        });
+        continue;
+      }
+    }
+
+    cleaned.push(entry);
+  }
+
+  return { cleaned, removedIds };
+};
+
 interface AppContextType {
   // Localization & Theme
   language: Language;
@@ -1417,6 +1515,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const updateSalesOrder = (id: string, oData: Partial<SalesOrder>) => {
+    lastPushTimeRef.current = Date.now();
+    hasUnsyncedChangesRef.current = true;
     setSalesOrders(prev => prev.map(o => o.id === id ? { ...o, ...oData } : o));
     const ord = salesOrders.find(item => item.id === id);
     if (ord) {
@@ -1730,6 +1830,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       );
     }
 
+    lastPushTimeRef.current = Date.now();
+    hasUnsyncedChangesRef.current = true;
+
     const dayBookEntry: DayBookEntry = {
       id: `db-${Date.now()}`,
       voucherNo: billNum,
@@ -1742,6 +1845,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       amount: Number(paidAmount || 0),
       walletId: paidAmount > 0 ? finalWalletId : 'credit',
       walletName: paidAmount > 0 ? walletName : 'Credit / বাকি',
+      referenceId: newPurchase.id,
       referenceNo: billNum,
       remarks: po.notes 
         ? `Converted from PO #${po.poNumber}. ${po.notes}`
@@ -1755,7 +1859,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setDayBookEntries(prev => [dayBookEntry, ...prev]);
 
     setPurchaseOrders(prev => prev.map(p => p.id === poId ? { ...p, status: 'FULLY_RECEIVED' } : p));
-    setPurchaseInvoices(prev => [newPurchase, ...prev]);
+    setPurchaseInvoices(prev => [newPurchase, ...prev.filter(p => p.id !== newPurchase.id)]);
 
     logActivity({
       actionType: 'STOCK_ADJUSTMENT',
@@ -1835,11 +1939,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const purchases: PurchaseInvoice[] = getPersistedData('purchaseInvoices', initialPurchaseInvoices);
     const sales: SaleInvoice[] = getPersistedData('saleInvoices', initialSaleInvoices);
     
-    let entries = Array.isArray(raw) ? [...raw] : [];
+    let entries = Array.isArray(raw) ? dedupeById([...raw]) : [];
 
     // Ensure all purchases are represented in DayBook
     purchases.forEach(pur => {
-      const exists = entries.some(e => e.voucherNo === pur.billNumber || e.referenceNo === pur.billNumber);
+      const exists = entries.some(
+        e =>
+          e.type === 'PURCHASE' &&
+          (e.referenceId === pur.id ||
+            e.voucherNo === pur.billNumber ||
+            e.referenceNo === pur.billNumber ||
+            (pur.supplierInvoiceNo && (e.voucherNo === pur.supplierInvoiceNo || e.referenceNo === pur.supplierInvoiceNo)))
+      );
       if (!exists) {
         entries.push({
           id: `db-pur-${pur.id}`,
@@ -1853,6 +1964,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           amount: Number(pur.paidAmount || 0), // ONLY the paid amount! (0 if credit)
           walletId: pur.paidAmount > 0 ? (pur.walletId || 'w-cash') : 'credit',
           walletName: pur.paidAmount > 0 ? (pur.walletName || 'Cash') : 'Credit / বাকি',
+          referenceId: pur.id,
           referenceNo: pur.billNumber,
           remarks: pur.notes
             ? `Purchase from ${pur.supplierName} (${pur.notes})`
@@ -1867,7 +1979,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     // Ensure all sales are represented in DayBook
     sales.forEach(sale => {
-      const exists = entries.some(e => e.voucherNo === sale.invoiceNumber || e.referenceNo === sale.invoiceNumber);
+      const exists = entries.some(
+        e =>
+          e.type === 'SALE' &&
+          (e.referenceId === sale.id ||
+            e.voucherNo === sale.invoiceNumber ||
+            e.referenceNo === sale.invoiceNumber)
+      );
       if (!exists) {
         entries.push({
           id: `db-sale-${sale.id}`,
@@ -1881,6 +1999,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           amount: Number(sale.paidAmount || 0), // ONLY the received amount! (0 if credit)
           walletId: sale.paidAmount > 0 ? (sale.walletId || 'w-cash') : 'due',
           walletName: sale.paidAmount > 0 ? (sale.walletName || 'Cash') : 'Credit / বাকি',
+          referenceId: sale.id,
           referenceNo: sale.invoiceNumber,
           remarks: sale.notes
             ? `Sale to ${sale.customerName} (${sale.notes})`
@@ -1893,23 +2012,40 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
     });
 
-    // Normalize any past entries where credit purchase/sale had grandTotal stored instead of paidAmount
-    return entries.map(entry => {
+    // Normalize any past entries & deduplicate linked sale/purchase entries
+    const normalized = entries.map(entry => {
       if (entry.type === 'PURCHASE') {
-        const matchingPur = purchases.find(p => p.billNumber === entry.voucherNo || p.billNumber === entry.referenceNo);
+        const matchingPur = purchases.find(
+          p =>
+            p.id === entry.referenceId ||
+            p.billNumber === entry.voucherNo ||
+            p.billNumber === entry.referenceNo ||
+            (p.supplierInvoiceNo && (p.supplierInvoiceNo === entry.voucherNo || p.supplierInvoiceNo === entry.referenceNo))
+        );
         if (matchingPur) {
           return {
             ...entry,
+            referenceId: matchingPur.id,
+            voucherNo: matchingPur.billNumber,
+            referenceNo: matchingPur.billNumber,
             amount: Number(matchingPur.paidAmount || 0),
             walletName: matchingPur.paidAmount > 0 ? (entry.walletName || matchingPur.walletName || 'Cash') : 'Credit / বাকি',
           };
         }
       }
       if (entry.type === 'SALE') {
-        const matchingSale = sales.find(s => s.invoiceNumber === entry.voucherNo || s.invoiceNumber === entry.referenceNo);
+        const matchingSale = sales.find(
+          s =>
+            s.id === entry.referenceId ||
+            s.invoiceNumber === entry.voucherNo ||
+            s.invoiceNumber === entry.referenceNo
+        );
         if (matchingSale) {
           return {
             ...entry,
+            referenceId: matchingSale.id,
+            voucherNo: matchingSale.invoiceNumber,
+            referenceNo: matchingSale.invoiceNumber,
             amount: Number(matchingSale.paidAmount || 0),
             walletName: matchingSale.paidAmount > 0 ? (entry.walletName || matchingSale.walletName || 'Cash') : 'Credit / বাকি',
           };
@@ -1917,6 +2053,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
       return entry;
     });
+
+    return dedupeTransactionDayBookEntries(normalized, sales, purchases).cleaned;
   });
   const [cashAdjustments, setCashAdjustments] = useState<CashAdjustment[]>(() => getPersistedData('cashAdjustments', initialCashAdjustments));
   const [activityLogs, setActivityLogs] = useState<ActivityLog[]>(() => getPersistedData('activityLogs', initialActivityLogs));
@@ -2864,8 +3002,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // Prevent overlapping pull calls
     if (isPullingRef.current) return false;
 
-    // Safety guard: if local device made an entry or pushed within the last 4.5s, don't overwrite with older server data
-    if (Date.now() - lastPushTimeRef.current < 4500) {
+    // Safety guard: if local device made an entry/edit or pushed within the last 4.5s, or has unsynced edits during a quiet pull, don't overwrite with older server data
+    if (Date.now() - lastPushTimeRef.current < 4500 || (hasUnsyncedChangesRef.current && quiet)) {
       return false;
     }
 
@@ -3059,10 +3197,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           if (Array.isArray(data.wallets) && data.wallets.length > 0) {
             setWallets(prev => filterByTombstone(shouldMerge ? mergeEntitiesById(prev, data.wallets) : data.wallets, 'wallets'));
           }
+          const mergedSalesList: SaleInvoice[] = Array.isArray(data.saleInvoices)
+            ? dedupeById(
+                (shouldMerge ? mergeEntitiesById(saleInvoices, data.saleInvoices) : data.saleInvoices) as SaleInvoice[]
+              ).filter(
+                inv => !allDeletedSaleIds.has(String(inv.id)) && (!inv.invoiceNumber || !allDeletedSaleIds.has(String(inv.invoiceNumber)))
+              )
+            : saleInvoices;
+
           if (Array.isArray(data.saleInvoices)) {
             setSaleInvoices(prev => {
               const merged = shouldMerge ? mergeEntitiesById(prev, data.saleInvoices) : data.saleInvoices;
-              return (merged as SaleInvoice[]).filter(
+              return dedupeById(merged as SaleInvoice[]).filter(
                 inv => !allDeletedSaleIds.has(String(inv.id)) && (!inv.invoiceNumber || !allDeletedSaleIds.has(String(inv.invoiceNumber)))
               );
             });
@@ -3075,10 +3221,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           if (Array.isArray(data.saleReturns)) {
             setSaleReturns(prev => filterByTombstone(shouldMerge ? mergeEntitiesById(prev, data.saleReturns) : data.saleReturns, 'saleReturns'));
           }
+
+          const mergedPurchasesList: PurchaseInvoice[] = Array.isArray(data.purchaseInvoices)
+            ? dedupeById(
+                (shouldMerge ? mergeEntitiesById(purchaseInvoices, data.purchaseInvoices) : data.purchaseInvoices) as PurchaseInvoice[]
+              ).filter(
+                inv => !allDeletedPurchaseIds.has(String(inv.id)) && (!inv.billNumber || !allDeletedPurchaseIds.has(String(inv.billNumber)))
+              )
+            : purchaseInvoices;
+
           if (Array.isArray(data.purchaseInvoices)) {
             setPurchaseInvoices(prev => {
               const merged = shouldMerge ? mergeEntitiesById(prev, data.purchaseInvoices) : data.purchaseInvoices;
-              return (merged as PurchaseInvoice[]).filter(
+              return dedupeById(merged as PurchaseInvoice[]).filter(
                 inv => !allDeletedPurchaseIds.has(String(inv.id)) && (!inv.billNumber || !allDeletedPurchaseIds.has(String(inv.billNumber)))
               );
             });
@@ -3122,7 +3277,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             setExpenseVouchers(prev => filterByTombstone(shouldMerge ? mergeEntitiesById(prev, data.expenseVouchers) : data.expenseVouchers, 'expenseVouchers'));
           }
           if (Array.isArray(data.dayBookEntries)) {
-            setDayBookEntries(prev => filterByTombstone(shouldMerge ? mergeEntitiesById(prev, data.dayBookEntries) : data.dayBookEntries, 'dayBookEntries'));
+            setDayBookEntries(prev => {
+              const filtered = filterByTombstone<DayBookEntry>(
+                shouldMerge
+                  ? mergeEntitiesById(prev, data.dayBookEntries as DayBookEntry[])
+                  : (data.dayBookEntries as DayBookEntry[]),
+                'dayBookEntries'
+              );
+              return dedupeTransactionDayBookEntries(filtered, mergedSalesList, mergedPurchasesList).cleaned;
+            });
           }
           if (Array.isArray(data.cashAdjustments)) {
             setCashAdjustments(prev => filterByTombstone(shouldMerge ? mergeEntitiesById(prev, data.cashAdjustments) : data.cashAdjustments, 'cashAdjustments'));
@@ -4708,6 +4871,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // 4. Always log every sale in Day Book (Transaction Ledger)
     // - If effectivePaidAmount > 0, amount is effectivePaidAmount (wallet received funds)
     // - If credit sale (effectivePaidAmount = 0), amount is 0 so Cash In Hand / Money In does NOT increase!
+    lastPushTimeRef.current = Date.now();
+    hasUnsyncedChangesRef.current = true;
+
     const dayBookEntry: DayBookEntry = {
       id: `db-${Date.now()}`,
       voucherNo: invNum,
@@ -4720,6 +4886,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       amount: effectivePaidAmount, // ONLY actual received cash/bank/MFS! (0 if credit)
       walletId: effectivePaidAmount > 0 && selectedWallet ? selectedWallet.id : 'due',
       walletName: effectivePaidAmount > 0 && selectedWallet ? selectedWallet.name : 'Credit / বাকি',
+      referenceId: newInvoice.id,
       referenceNo: invNum,
       remarks: data.notes 
         ? `Sale to ${data.customerName} (${data.notes})` 
@@ -4731,7 +4898,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
     setDayBookEntries(prev => [dayBookEntry, ...prev]);
 
-    setSaleInvoices(prev => [newInvoice, ...prev]);
+    setSaleInvoices(prev => [newInvoice, ...prev.filter(i => i.id !== newInvoice.id)]);
 
     // 5. Auto Register Warranty Records for items with warranty configuration
     const newWarrantyRecords: WarrantyRecord[] = [];
@@ -5202,34 +5369,54 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       );
     }
 
-    // 4. Update linked DayBook Entry IN-PLACE (preserve id & createdAt)
+    lastPushTimeRef.current = Date.now();
+    hasUnsyncedChangesRef.current = true;
+
+    // 4. Update linked DayBook Entry IN-PLACE & collapse any duplicate entries for this sale invoice
     const updatedDayBookRemarks = data.notes
       ? `Sale to ${data.customerName} (${data.notes})`
       : effectivePaidAmount > 0
         ? `POS Sale receipt from ${data.customerName} (Total: ৳${data.grandTotal.toLocaleString()}, Received: ৳${effectivePaidAmount.toLocaleString()}${effectiveDueAmount > 0 ? `, Due: ৳${effectiveDueAmount.toLocaleString()}` : ''})`
         : `Credit Sale / বাকি বিক্রয় to ${data.customerName} (Total: ৳${data.grandTotal.toLocaleString()}, Due: ৳${effectiveDueAmount.toLocaleString()})`;
 
+    const isSaleDayBookMatch = (d: DayBookEntry) =>
+      d.type === 'SALE' &&
+      (d.referenceId === invoiceId ||
+        d.id === `db-sale-${invoiceId}` ||
+        d.voucherNo === oldInv.invoiceNumber ||
+        d.referenceNo === oldInv.invoiceNumber ||
+        d.voucherNo === rawInvNum ||
+        d.referenceNo === rawInvNum);
+
+    const matchingSaleDbEntries = dayBookEntries.filter(isSaleDayBookMatch);
+    const extraSaleDbIds = matchingSaleDbEntries.slice(1).map(d => d.id);
+    if (extraSaleDbIds.length > 0) {
+      recordDeletedTombstones('dayBookEntries', extraSaleDbIds);
+    }
+
     setDayBookEntries(prev => {
-      const matchIdx = prev.findIndex(
-        d => d.type === 'SALE' && (d.voucherNo === oldInv.invoiceNumber || d.referenceNo === oldInv.invoiceNumber)
-      );
-      if (matchIdx >= 0) {
-        return prev.map((d, idx) =>
-          idx === matchIdx
-            ? {
-                ...d,
-                voucherNo: rawInvNum,
-                referenceNo: rawInvNum,
-                date: invDate,
-                partyId: data.customerId,
-                partyName: data.customerName,
-                amount: effectivePaidAmount,
-                walletId: effectivePaidAmount > 0 && selectedWallet ? selectedWallet.id : 'due',
-                walletName: effectivePaidAmount > 0 && selectedWallet ? selectedWallet.name : 'Credit / বাকি',
-                remarks: updatedDayBookRemarks,
-              }
-            : d
-        );
+      const firstMatchIdx = prev.findIndex(isSaleDayBookMatch);
+      if (firstMatchIdx >= 0) {
+        const primaryId = prev[firstMatchIdx].id;
+        return prev
+          .filter(d => !isSaleDayBookMatch(d) || d.id === primaryId)
+          .map(d =>
+            d.id === primaryId
+              ? {
+                  ...d,
+                  referenceId: invoiceId,
+                  voucherNo: rawInvNum,
+                  referenceNo: rawInvNum,
+                  date: invDate,
+                  partyId: data.customerId,
+                  partyName: data.customerName,
+                  amount: effectivePaidAmount,
+                  walletId: effectivePaidAmount > 0 && selectedWallet ? selectedWallet.id : 'due',
+                  walletName: effectivePaidAmount > 0 && selectedWallet ? selectedWallet.name : 'Credit / বাকি',
+                  remarks: updatedDayBookRemarks,
+                }
+              : d
+          );
       }
       return [
         {
@@ -5244,6 +5431,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           amount: effectivePaidAmount,
           walletId: effectivePaidAmount > 0 && selectedWallet ? selectedWallet.id : 'due',
           walletName: effectivePaidAmount > 0 && selectedWallet ? selectedWallet.name : 'Credit / বাকি',
+          referenceId: invoiceId,
           referenceNo: rawInvNum,
           remarks: updatedDayBookRemarks,
           createdBy: currentUser?.id || 'usr-1',
@@ -5253,8 +5441,33 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       ];
     });
 
-    // 5. Update SaleInvoice IN-PLACE (NEVER append/duplicate!)
-    setSaleInvoices(prev => prev.map(inv => (inv.id === invoiceId ? updatedInvoice : inv)));
+    // 5. Update SaleInvoice IN-PLACE & deduplicate by ID (NEVER append/duplicate!)
+    setSaleInvoices(prev => dedupeById(prev.map(inv => (inv.id === invoiceId ? updatedInvoice : inv))));
+
+    // 5.5 Sync updated Invoice # across linked Returns, Installments, and Warranty Claims
+    if (rawInvNum !== oldInv.invoiceNumber) {
+      setSaleReturns(prev =>
+        prev.map(r =>
+          r.invoiceId === invoiceId || r.originalInvoiceNumber === oldInv.invoiceNumber
+            ? { ...r, originalInvoiceNumber: rawInvNum }
+            : r
+        )
+      );
+      setInstallmentSchemes(prev =>
+        prev.map(s =>
+          s.invoiceId === invoiceId || s.invoiceNumber === oldInv.invoiceNumber
+            ? { ...s, invoiceNumber: rawInvNum }
+            : s
+        )
+      );
+      setWarrantyClaims(prev =>
+        prev.map(c =>
+          c.invoiceNumber === oldInv.invoiceNumber
+            ? { ...c, invoiceNumber: rawInvNum }
+            : c
+        )
+      );
+    }
 
     // 6. Sync Warranty Records cleanly for this invoice
     const rebuiltWarranties: WarrantyRecord[] = [];
@@ -5426,14 +5639,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     // 5. Remove linked DayBook entry if created for this invoice
-    const removedDayBookIds = dayBookEntries
-      .filter(d => d.voucherNo === inv.invoiceNumber || d.referenceNo === inv.invoiceNumber)
-      .map(d => d.id);
-    setDayBookEntries(prev =>
-      prev.filter(
-        d => d.voucherNo !== inv.invoiceNumber && d.referenceNo !== inv.invoiceNumber
-      )
-    );
+    const isLinkedSaleDb = (d: DayBookEntry) =>
+      (d.type === 'SALE' && (d.referenceId === inv.id || d.id === `db-sale-${inv.id}`)) ||
+      d.voucherNo === inv.invoiceNumber ||
+      d.referenceNo === inv.invoiceNumber;
+    const removedDayBookIds = dayBookEntries.filter(isLinkedSaleDb).map(d => d.id);
+    setDayBookEntries(prev => prev.filter(d => !isLinkedSaleDb(d)));
     if (removedDayBookIds.length > 0) {
       recordDeletedTombstones('dayBookEntries', removedDayBookIds);
     }
@@ -6811,6 +7022,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       );
     }
 
+    lastPushTimeRef.current = Date.now();
+    hasUnsyncedChangesRef.current = true;
+
     // 4. Always log every purchase in Day Book (Transaction Ledger)
     // - If effectivePaidAmount > 0, amount is effectivePaidAmount (wallet deducted funds)
     // - If credit purchase (effectivePaidAmount = 0), amount is 0 so Cash In Hand / Money Out does NOT change!
@@ -6826,6 +7040,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       amount: effectivePaidAmount, // ONLY actual paid amount deducted from wallet! (0 if credit)
       walletId: effectivePaidAmount > 0 && selectedWallet ? selectedWallet.id : 'credit',
       walletName: effectivePaidAmount > 0 && selectedWallet ? selectedWallet.name : 'Credit / বাকি',
+      referenceId: newPurchase.id,
       referenceNo: billNum,
       remarks: data.notes 
         ? `Purchase from ${data.supplierName} (${data.notes})` 
@@ -6837,7 +7052,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
     setDayBookEntries(prev => [dayBookEntry, ...prev]);
 
-    setPurchaseInvoices(prev => [newPurchase, ...prev]);
+    setPurchaseInvoices(prev => [newPurchase, ...prev.filter(p => p.id !== newPurchase.id)]);
     showToast(
       language === 'bn'
         ? `ক্রয় ভাউচার ${billNum} সফলভাবে সংরক্ষিত হয়েছে।`
@@ -7007,7 +7222,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             let remainingToDeduct = totalOldBaseQty;
             workingBatches = workingBatches
               .map(b => {
-                if (b.purchaseInvoiceNo === oldInv.billNumber && remainingToDeduct > 0) {
+                const matchesOldRef =
+                  b.purchaseInvoiceNo === oldInv.billNumber ||
+                  (oldInv.supplierInvoiceNo && b.purchaseInvoiceNo === oldInv.supplierInvoiceNo);
+                if (matchesOldRef && remainingToDeduct > 0) {
                   const take = Math.min(b.stock, remainingToDeduct);
                   remainingToDeduct = Number((remainingToDeduct - take).toFixed(4));
                   return {
@@ -7017,7 +7235,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                 }
                 return b;
               })
-              .filter(b => b.stock > 0 || b.purchaseInvoiceNo !== oldInv.billNumber);
+              .filter(
+                b =>
+                  b.stock > 0 ||
+                  (b.purchaseInvoiceNo !== oldInv.billNumber &&
+                    (!oldInv.supplierInvoiceNo || b.purchaseInvoiceNo !== oldInv.supplierInvoiceNo))
+              );
 
             // If some old qty belonged to a merged batch that didn't match billNumber directly
             if (remainingToDeduct > 1e-6) {
@@ -7175,34 +7398,55 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       );
     }
 
-    // 4. Update linked DayBook Entry IN-PLACE (preserve id & createdAt)
+    lastPushTimeRef.current = Date.now();
+    hasUnsyncedChangesRef.current = true;
+
+    // 4. Update linked DayBook Entry IN-PLACE & collapse any duplicate entries for this purchase bill
     const updatedDayBookRemarks = data.notes
       ? `Purchase from ${data.supplierName} (${data.notes})`
       : effectivePaidAmount > 0
         ? `Purchase payment to ${data.supplierName} (Total: ৳${data.grandTotal.toLocaleString()}, Paid: ৳${effectivePaidAmount.toLocaleString()}${effectiveDueAmount > 0 ? `, Remaining Due: ৳${effectiveDueAmount.toLocaleString()}` : ''})`
         : `Credit Purchase / বাকি ক্রয় from ${data.supplierName} (Total: ৳${data.grandTotal.toLocaleString()}, Due: ৳${effectiveDueAmount.toLocaleString()})`;
 
+    const isPurchaseDayBookMatch = (d: DayBookEntry) =>
+      d.type === 'PURCHASE' &&
+      (d.referenceId === invoiceId ||
+        d.id === `db-pur-${invoiceId}` ||
+        d.voucherNo === oldInv.billNumber ||
+        d.referenceNo === oldInv.billNumber ||
+        (oldInv.supplierInvoiceNo && (d.voucherNo === oldInv.supplierInvoiceNo || d.referenceNo === oldInv.supplierInvoiceNo)) ||
+        d.voucherNo === billNum ||
+        d.referenceNo === billNum);
+
+    const matchingPurDbEntries = dayBookEntries.filter(isPurchaseDayBookMatch);
+    const extraPurDbIds = matchingPurDbEntries.slice(1).map(d => d.id);
+    if (extraPurDbIds.length > 0) {
+      recordDeletedTombstones('dayBookEntries', extraPurDbIds);
+    }
+
     setDayBookEntries(prev => {
-      const matchIdx = prev.findIndex(
-        d => d.type === 'PURCHASE' && (d.voucherNo === oldInv.billNumber || d.referenceNo === oldInv.billNumber)
-      );
-      if (matchIdx >= 0) {
-        return prev.map((d, idx) =>
-          idx === matchIdx
-            ? {
-                ...d,
-                voucherNo: billNum,
-                referenceNo: billNum,
-                date: purDate,
-                partyId: data.supplierId,
-                partyName: data.supplierName,
-                amount: effectivePaidAmount,
-                walletId: effectivePaidAmount > 0 && selectedWallet ? selectedWallet.id : 'credit',
-                walletName: effectivePaidAmount > 0 && selectedWallet ? selectedWallet.name : 'Credit / বাকি',
-                remarks: updatedDayBookRemarks,
-              }
-            : d
-        );
+      const firstMatchIdx = prev.findIndex(isPurchaseDayBookMatch);
+      if (firstMatchIdx >= 0) {
+        const primaryId = prev[firstMatchIdx].id;
+        return prev
+          .filter(d => !isPurchaseDayBookMatch(d) || d.id === primaryId)
+          .map(d =>
+            d.id === primaryId
+              ? {
+                  ...d,
+                  referenceId: invoiceId,
+                  voucherNo: billNum,
+                  referenceNo: billNum,
+                  date: purDate,
+                  partyId: data.supplierId,
+                  partyName: data.supplierName,
+                  amount: effectivePaidAmount,
+                  walletId: effectivePaidAmount > 0 && selectedWallet ? selectedWallet.id : 'credit',
+                  walletName: effectivePaidAmount > 0 && selectedWallet ? selectedWallet.name : 'Credit / বাকি',
+                  remarks: updatedDayBookRemarks,
+                }
+              : d
+          );
       }
       return [
         {
@@ -7217,6 +7461,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           amount: effectivePaidAmount,
           walletId: effectivePaidAmount > 0 && selectedWallet ? selectedWallet.id : 'credit',
           walletName: effectivePaidAmount > 0 && selectedWallet ? selectedWallet.name : 'Credit / বাকি',
+          referenceId: invoiceId,
           referenceNo: billNum,
           remarks: updatedDayBookRemarks,
           createdBy: currentUser?.id || 'usr-1',
@@ -7226,8 +7471,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       ];
     });
 
-    // 5. Update PurchaseInvoice IN-PLACE (NEVER append/duplicate!)
-    setPurchaseInvoices(prev => prev.map(p => (p.id === invoiceId ? updatedPurchase : p)));
+    // 5. Update PurchaseInvoice IN-PLACE & deduplicate by ID (NEVER append/duplicate!)
+    setPurchaseInvoices(prev => dedupeById(prev.map(p => (p.id === invoiceId ? updatedPurchase : p))));
+
+    // 5.5 Sync updated Bill # across linked Purchase Returns
+    if (billNum !== oldInv.billNumber) {
+      setPurchaseReturns(prev =>
+        prev.map(r =>
+          r.purchaseId === invoiceId || r.originalBillNumber === oldInv.billNumber
+            ? { ...r, originalBillNumber: billNum }
+            : r
+        )
+      );
+    }
 
     showToast(
       language === 'bn'
@@ -7374,14 +7630,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     // 5. Remove linked DayBook entry if created for this invoice
-    const removedDayBookIds = dayBookEntries
-      .filter(d => d.voucherNo === inv.billNumber || d.referenceNo === inv.billNumber)
-      .map(d => d.id);
-    setDayBookEntries(prev =>
-      prev.filter(
-        d => d.voucherNo !== inv.billNumber && d.referenceNo !== inv.billNumber
-      )
-    );
+    const isLinkedPurchaseDb = (d: DayBookEntry) =>
+      (d.type === 'PURCHASE' && (d.referenceId === inv.id || d.id === `db-pur-${inv.id}`)) ||
+      d.voucherNo === inv.billNumber ||
+      d.referenceNo === inv.billNumber ||
+      (inv.supplierInvoiceNo && (d.voucherNo === inv.supplierInvoiceNo || d.referenceNo === inv.supplierInvoiceNo));
+    const removedDayBookIds = dayBookEntries.filter(isLinkedPurchaseDb).map(d => d.id);
+    setDayBookEntries(prev => prev.filter(d => !isLinkedPurchaseDb(d)));
     if (removedDayBookIds.length > 0) {
       recordDeletedTombstones('dayBookEntries', removedDayBookIds);
     }
@@ -9197,6 +9452,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       })
     );
 
+    lastPushTimeRef.current = Date.now();
+    hasUnsyncedChangesRef.current = true;
+
     // Day Book
     const dbEntry: DayBookEntry = {
       id: `db-${Date.now()}`,
@@ -9209,6 +9467,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       amount: vData.amount,
       walletId: vData.walletId,
       walletName: targetWallet?.name || 'Cash',
+      referenceId: newVoucher.id,
       referenceNo: voucherNo,
       remarks: `[${vData.categoryName}] ${vData.note} (Payee: ${vData.payee})`,
       createdBy: currentUser?.id || 'usr-1',
@@ -9216,7 +9475,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
     setDayBookEntries(prev => [dbEntry, ...prev]);
 
-    setExpenseVouchers(prev => [newVoucher, ...prev]);
+    setExpenseVouchers(prev => [newVoucher, ...prev.filter(e => e.id !== newVoucher.id)]);
     showToast(
       language === 'bn'
         ? `খরচের ভাউচার ${voucherNo} সংরক্ষিত হয়েছে।`

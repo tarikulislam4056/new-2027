@@ -136,6 +136,8 @@ export const PosSaleView: React.FC<PosSaleViewProps> = ({
   const [saleMode, setSaleMode] = useState<'CASH' | 'CREDIT' | 'INSTALLMENT'>(
     initialData ? (initialData.dueAmount > 0 ? 'CREDIT' : 'CASH') : 'CASH'
   );
+  const isSubmittingRef = useRef(false);
+  const [isSaving, setIsSaving] = useState(false);
 
   // Master Hold Bills state
   const [heldBills, setHeldBills] = useState<{
@@ -1163,9 +1165,18 @@ export const PosSaleView: React.FC<PosSaleViewProps> = ({
 
   // Submit Save
   const handleSaveInvoice = (isSaveAndNew = false) => {
+    if (isSubmittingRef.current) return;
+    isSubmittingRef.current = true;
+    setIsSaving(true);
+    const releaseSubmitting = () => {
+      isSubmittingRef.current = false;
+      setIsSaving(false);
+    };
+
     const validItems = items.filter(i => i.productId && i.quantity > 0);
     if (validItems.length === 0) {
       showToast(language === 'bn' ? 'অন্তত একটি পণ্য নির্বাচন করুন!' : 'Please add at least one product!', 'warning');
+      releaseSubmitting();
       return;
     }
 
@@ -1179,6 +1190,7 @@ export const PosSaleView: React.FC<PosSaleViewProps> = ({
             : `⚠️ Invoice number "${finalInvoiceNo}" is already used by another invoice!`,
           'error'
         );
+        releaseSubmitting();
         return;
       }
       finalInvoiceNo = getNextSaleInvoiceNumber ? getNextSaleInvoiceNumber() : `INV-2026-${Date.now().toString().slice(-4)}`;
@@ -1241,6 +1253,7 @@ export const PosSaleView: React.FC<PosSaleViewProps> = ({
               : `Batch not found for "${item.name}"!`,
             'error'
           );
+          releaseSubmitting();
           return;
         }
 
@@ -1257,6 +1270,7 @@ export const PosSaleView: React.FC<PosSaleViewProps> = ({
               : `⚠️ Selected batch "${batch.batchNumber}" of "${item.name}" is expired (${batch.expDate})! Expired batches cannot be sold.`,
             'error'
           );
+          releaseSubmitting();
           return;
         }
 
@@ -1267,6 +1281,7 @@ export const PosSaleView: React.FC<PosSaleViewProps> = ({
               : `Insufficient stock in batch "${batch.batchNumber}" for "${item.name}" (Stock: ${formatStockWithUnit(effectiveBatchStock, product)})!`,
             'error'
           );
+          releaseSubmitting();
           return;
         }
       } else if (product.batches && product.batches.length > 0) {
@@ -1281,6 +1296,7 @@ export const PosSaleView: React.FC<PosSaleViewProps> = ({
               : `⚠️ All batches of "${item.name}" are expired! Expired batches cannot be sold.`,
             'error'
           );
+          releaseSubmitting();
           return;
         }
 
@@ -1293,6 +1309,7 @@ export const PosSaleView: React.FC<PosSaleViewProps> = ({
               : `⚠️ Insufficient valid stock for "${item.name}". Only ${formatStockWithUnit(totalValidStock, product)} available in valid batches!`,
             'error'
           );
+          releaseSubmitting();
           return;
         }
       } else {
@@ -1305,6 +1322,7 @@ export const PosSaleView: React.FC<PosSaleViewProps> = ({
               : `⚠️ "${item.name}" is expired (Exp Date: ${product.expDate})! Expired products cannot be sold.`,
             'error'
           );
+          releaseSubmitting();
           return;
         }
 
@@ -1315,12 +1333,13 @@ export const PosSaleView: React.FC<PosSaleViewProps> = ({
               : `Insufficient stock for "${product.name}" (Stock: ${formatStockWithUnit(effectiveSimpleStock, product)})!`,
             'error'
           );
+          releaseSubmitting();
           return;
         }
       }
     }
 
-    if (saleMode === 'INSTALLMENT') {
+    if (saleMode === 'INSTALLMENT' && !initialData) {
       if (selectedCustomerId === 'walk-in' || !selectedCustomer?.id) {
         showToast(
           language === 'bn'
@@ -1328,11 +1347,13 @@ export const PosSaleView: React.FC<PosSaleViewProps> = ({
             : 'Please select or register a customer for installment / EMI sales!',
           'error'
         );
+        releaseSubmitting();
         return;
       }
 
       if (emiTotalInstallments <= 0) {
         showToast(language === 'bn' ? 'সঠিক কিস্তির সংখ্যা দিন!' : 'Please enter valid installment count!', 'error');
+        releaseSubmitting();
         return;
       }
 
@@ -1390,7 +1411,10 @@ export const PosSaleView: React.FC<PosSaleViewProps> = ({
         date: invoiceDate,
       });
 
-      if (!newInvoice) return;
+      if (!newInvoice) {
+        releaseSubmitting();
+        return;
+      }
 
       // 2. Create Installment Scheme
       const newScheme = createInstallmentScheme(
@@ -1462,6 +1486,7 @@ export const PosSaleView: React.FC<PosSaleViewProps> = ({
       );
 
       handleResetForm();
+      releaseSubmitting();
       return;
     }
 
@@ -1472,6 +1497,7 @@ export const PosSaleView: React.FC<PosSaleViewProps> = ({
           : 'Please select a registered customer to record due balance!',
         'error'
       );
+      releaseSubmitting();
       return;
     }
 
@@ -1532,7 +1558,10 @@ export const PosSaleView: React.FC<PosSaleViewProps> = ({
       ? updateSaleInvoice(initialData.id, payload)
       : createSaleInvoice(payload);
 
-    if (!savedInvoice) return;
+    if (!savedInvoice) {
+      releaseSubmitting();
+      return;
+    }
 
     try {
       confetti({
@@ -1571,6 +1600,7 @@ export const PosSaleView: React.FC<PosSaleViewProps> = ({
     }
 
     handleResetForm();
+    releaseSubmitting();
   };
 
   return (
@@ -3161,8 +3191,9 @@ export const PosSaleView: React.FC<PosSaleViewProps> = ({
           {!initialData && (
             <button
               type="button"
+              disabled={isSaving}
               onClick={() => handleSaveInvoice(true)}
-              className="px-6 py-2.5 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 border border-[#DCD6FE] dark:border-slate-600 text-slate-700 dark:text-slate-200 rounded-xl text-xs sm:text-sm font-bold shadow-2xs transition-all cursor-pointer"
+              className="px-6 py-2.5 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 border border-[#DCD6FE] dark:border-slate-600 text-slate-700 dark:text-slate-200 rounded-xl text-xs sm:text-sm font-bold shadow-2xs transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
             >
               Save and New
             </button>
@@ -3171,8 +3202,9 @@ export const PosSaleView: React.FC<PosSaleViewProps> = ({
           {/* Save / Update Button */}
           <button
             type="button"
+            disabled={isSaving}
             onClick={() => handleSaveInvoice(false)}
-            className={`px-8 py-2.5 ${initialData ? 'bg-amber-600 hover:bg-amber-700 active:bg-amber-800' : 'bg-[#8A7CFA] hover:bg-[#7868F7] active:bg-[#6856E8]'} text-white rounded-xl text-xs sm:text-sm font-bold shadow-xs transition-all cursor-pointer flex items-center gap-2`}
+            className={`px-8 py-2.5 ${initialData ? 'bg-amber-600 hover:bg-amber-700 active:bg-amber-800' : 'bg-[#8A7CFA] hover:bg-[#7868F7] active:bg-[#6856E8]'} text-white rounded-xl text-xs sm:text-sm font-bold shadow-xs transition-all cursor-pointer flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed`}
           >
             {initialData ? <Check className="w-4 h-4" /> : <Printer className="w-4 h-4" />}
             <span>
