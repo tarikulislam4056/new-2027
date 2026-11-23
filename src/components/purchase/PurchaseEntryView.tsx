@@ -85,6 +85,7 @@ export const PurchaseEntryView: React.FC<PurchaseEntryViewProps> = ({
     getNextPurchaseBillNumber,
     formatCurrency,
     createPurchaseInvoice,
+    updatePurchaseInvoice,
     deletePurchaseInvoice,
     openPrintModal,
     showToast,
@@ -150,13 +151,18 @@ export const PurchaseEntryView: React.FC<PurchaseEntryViewProps> = ({
     initialData
       ? initialData.items.map((i, idx) => {
           const matchedProd = products.find(p => p.id === i.productId);
+          const qtyVal = Number(i.quantity || 0);
+          const derivedUnitDisc =
+            qtyVal > 0 && Number(i.purchasePrice || 0) * qtyVal > Number(i.total || 0)
+              ? Number(((Number(i.purchasePrice || 0) * qtyVal - Number(i.total || 0)) / qtyVal).toFixed(4))
+              : 0;
           return {
             ...i,
             id: `row-${idx}`,
             name: i.productName || '',
             conversionFactor: i.conversionFactor || getUnitMultiplier(matchedProd, i.unit),
             barcode: matchedProd?.barcode || '',
-            discount: 0,
+            discount: derivedUnitDisc,
             discountType: 'flat',
             taxPercent: 0,
             stock: matchedProd?.stock || 0,
@@ -198,30 +204,58 @@ export const PurchaseEntryView: React.FC<PurchaseEntryViewProps> = ({
   const [isCameraScannerOpen, setIsCameraScannerOpen] = useState(false);
 
   // Payment splits
-  const [paymentSplits, setPaymentSplits] = useState<SplitPaymentRow[]>(
-    initialData && initialData.paidAmount > 0
-      ? [
-          {
-            id: 'pay-1',
-            method: initialData.paymentMethod,
-            walletId: initialData.walletId,
-            amount: initialData.paidAmount,
-          },
-        ]
-      : [
-          {
-            id: 'pay-1',
-            method: 'CASH',
-            walletId: wallets[0]?.id || 'w-cash',
-            amount: 0,
-          },
-        ]
-  );
+  const [paymentSplits, setPaymentSplits] = useState<SplitPaymentRow[]>(() => {
+    if (initialData && initialData.paidAmount > 0) {
+      const safeMethod = initialData.paymentMethod === 'DUE' ? 'CASH' : initialData.paymentMethod;
+      const safeWalletId =
+        initialData.walletId && initialData.walletId !== 'credit' && initialData.walletId !== 'due'
+          ? initialData.walletId
+          : wallets[0]?.id || 'w-cash';
+      return [
+        {
+          id: 'pay-1',
+          method: safeMethod,
+          walletId: safeWalletId,
+          amount: initialData.paidAmount,
+        },
+      ];
+    }
+    if (initialData && initialData.dueAmount > 0) {
+      return [
+        {
+          id: 'pay-1',
+          method: 'DUE',
+          walletId: wallets[0]?.id || 'w-cash',
+          amount: 0,
+        },
+      ];
+    }
+    return [
+      {
+        id: 'pay-1',
+        method: 'CASH',
+        walletId: wallets[0]?.id || 'w-cash',
+        amount: 0,
+      },
+    ];
+  });
 
-  // Delivery / Net / Description / Attachment
-  const [deliveryFee, setDeliveryFee] = useState<number>(0);
+  // Delivery / Net / Description / Attachment (parse out Shipping Fee if previously appended)
+  const initialParsedNotes = (() => {
+    const raw = initialData?.notes || '';
+    const match = raw.match(/\s*\(Shipping Fee:\s*৳([\d.,]+)\)\s*$/);
+    if (match) {
+      return {
+        fee: parseFloat(match[1].replace(/,/g, '')) || 0,
+        cleanNotes: raw.slice(0, match.index).trim(),
+      };
+    }
+    return { fee: 0, cleanNotes: raw };
+  })();
+
+  const [deliveryFee, setDeliveryFee] = useState<number>(initialParsedNotes.fee);
   const [sendSupplierSms, setSendSupplierSms] = useState<boolean>(false);
-  const [description, setDescription] = useState<string>(initialData?.notes || '');
+  const [description, setDescription] = useState<string>(initialParsedNotes.cleanNotes);
   const [attachedImage, setAttachedImage] = useState<string | null>(null);
 
   // Selected supplier object
@@ -705,16 +739,24 @@ export const PurchaseEntryView: React.FC<PurchaseEntryViewProps> = ({
       return;
     }
 
-    // Check wallet balance for any paid amount
+    // Check wallet balance for any paid amount (accounting for refund of initialData payment if editing)
     if (totalPaidAmount > 0) {
       for (const split of paymentSplits) {
         if (split.amount > 0 && split.method !== 'DUE') {
           const splitWallet = wallets.find(w => w.id === split.walletId) || wallets[0];
-          if (!splitWallet || splitWallet.balance < split.amount) {
+          const oldPaidRefund =
+            initialData &&
+            initialData.paidAmount > 0 &&
+            initialData.paymentMethod !== 'DUE' &&
+            initialData.walletId === splitWallet?.id
+              ? initialData.paidAmount
+              : 0;
+          const effectiveWalletBal = (splitWallet?.balance || 0) + oldPaidRefund;
+          if (!splitWallet || effectiveWalletBal + 1e-6 < split.amount) {
             showToast(
               language === 'bn'
-                ? `"${splitWallet?.name || 'ওয়ালেট'}"-এ পর্যাপ্ত টাকা নেই! বর্তমান ব্যালেন্স: ৳${splitWallet?.balance.toLocaleString() || 0} | পরিশোধ: ৳${split.amount.toLocaleString()}। ক্রয়টি বাকি (Credit) হিসেবে এন্ট্রি করুন অথবা ওয়ালেট পরিবর্তন করুন।`
-                : `Insufficient balance in "${splitWallet?.name || 'wallet'}"! Available: ৳${splitWallet?.balance.toLocaleString() || 0} | Trying to pay: ৳${split.amount.toLocaleString()}. Please choose another wallet or save as credit.`,
+                ? `"${splitWallet?.name || 'ওয়ালেট'}"-এ পর্যাপ্ত টাকা নেই! বর্তমান ব্যালেন্স: ৳${effectiveWalletBal.toLocaleString()} | পরিশোধ: ৳${split.amount.toLocaleString()}। ক্রয়টি বাকি (Credit) হিসেবে এন্ট্রি করুন অথবা ওয়ালেট পরিবর্তন করুন।`
+                : `Insufficient balance in "${splitWallet?.name || 'wallet'}"! Available: ৳${effectiveWalletBal.toLocaleString()} | Trying to pay: ৳${split.amount.toLocaleString()}. Please choose another wallet or save as credit.`,
               'error'
             );
             return;
@@ -743,7 +785,7 @@ export const PurchaseEntryView: React.FC<PurchaseEntryViewProps> = ({
     const activePaidSplit = paymentSplits.find(s => s.method !== 'DUE' && Number(s.amount || 0) > 0);
     const isFullCreditPurchase = totalPaidAmount <= 0 || !activePaidSplit;
 
-    const newPurchase = createPurchaseInvoice({
+    const payload = {
       supplierId: selectedSupplier?.id || '',
       supplierName: selectedSupplier?.name || 'Supplier',
       supplierPhone: selectedSupplier?.phone || '',
@@ -756,13 +798,17 @@ export const PurchaseEntryView: React.FC<PurchaseEntryViewProps> = ({
       grandTotal: totalAmount,
       paidAmount: isFullCreditPurchase ? 0 : totalPaidAmount,
       dueAmount: isFullCreditPurchase ? totalAmount : dueAmount,
-      paymentMethod: isFullCreditPurchase ? 'DUE' : activePaidSplit.method,
+      paymentMethod: (isFullCreditPurchase ? 'DUE' : activePaidSplit.method) as PaymentMethod,
       walletId: isFullCreditPurchase ? 'credit' : activePaidSplit.walletId,
       notes: description + (deliveryFee > 0 ? ` (Shipping Fee: ৳${deliveryFee})` : ''),
       date: invoiceDate,
-    });
+    };
 
-    if (!newPurchase) return;
+    const savedPurchase = initialData
+      ? updatePurchaseInvoice(initialData.id, payload)
+      : createPurchaseInvoice(payload);
+
+    if (!savedPurchase) return;
 
     try {
       confetti({
@@ -777,15 +823,19 @@ export const PurchaseEntryView: React.FC<PurchaseEntryViewProps> = ({
     if (!isSaveAndNew) {
       openPrintModal({
         type: 'PURCHASE_VOUCHER',
-        title: `Purchase Bill #${newPurchase.billNumber}`,
-        data: newPurchase,
+        title: `Purchase Bill #${savedPurchase.billNumber}`,
+        data: savedPurchase,
       });
     }
 
-    showToast(
-      language === 'bn' ? 'ক্রয় চালান সফলভাবে সংরক্ষিত হয়েছে!' : 'Purchase bill created successfully!',
-      'success'
-    );
+    if (initialData) {
+      if (onCancelEdit) {
+        onCancelEdit();
+      } else {
+        setActiveTab('purchase-list');
+      }
+      return;
+    }
 
     handleResetForm();
   };
@@ -802,7 +852,13 @@ export const PurchaseEntryView: React.FC<PurchaseEntryViewProps> = ({
         <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between pb-4 border-b border-[#ECE8FF] dark:border-slate-800 gap-3">
           <div className="flex items-center gap-3">
             <h2 className="text-xl sm:text-2xl font-bold text-slate-800 dark:text-white tracking-tight">
-              {language === 'bn' ? 'নতুন ক্রয় (New Purchase)' : 'New Purchase'}
+              {initialData
+                ? language === 'bn'
+                  ? `ক্রয় চালান ইডিট (#${initialData.billNumber})`
+                  : `Edit Purchase (#${initialData.billNumber})`
+                : language === 'bn'
+                  ? 'নতুন ক্রয় (New Purchase)'
+                  : 'New Purchase'}
             </h2>
             <button
               type="button"

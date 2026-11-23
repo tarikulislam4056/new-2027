@@ -39,18 +39,21 @@ import {
   Undo2,
   AlertCircle,
   Receipt,
+  Edit,
 } from 'lucide-react';
 
 interface SalesListViewProps {
   initialSubTab?: 'active' | 'deleted';
   onOpenPaymentInModal: (customerId?: string) => void;
   onOpenReturnModal?: (invoice: SaleInvoice) => void;
+  onEditInvoice?: (invoice: SaleInvoice) => void;
 }
 
 export const SalesListView: React.FC<SalesListViewProps> = ({
   initialSubTab = 'active',
   onOpenPaymentInModal,
   onOpenReturnModal,
+  onEditInvoice,
 }) => {
   const {
     language,
@@ -989,6 +992,40 @@ export const SalesListView: React.FC<SalesListViewProps> = ({
                                 </span>
                               )}
 
+                              {/* 7.5 Edit Invoice Button (Gated by Edit Permission & non-EMI / non-returned check) */}
+                              {onEditInvoice && hasEditPermission && (
+                                inv.isInstallmentSale || inv.paymentMethod === 'INSTALLMENT' || (inv.returnStatus && inv.returnStatus !== 'NONE') ? (
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      showToast(
+                                        language === 'bn'
+                                          ? 'কিস্তি (EMI) বা রিটার্নকৃত চালান সরাসরি ইডিট করা যাবে না।'
+                                          : 'Installment (EMI) or returned invoices cannot be edited directly.',
+                                        'warning'
+                                      )
+                                    }
+                                    title={
+                                      language === 'bn'
+                                        ? 'কিস্তি বা রিটার্নকৃত চালান ইডিটযোগ্য নয়'
+                                        : 'Installment / returned invoice cannot be edited'
+                                    }
+                                    className="p-1.5 text-slate-300 dark:text-slate-600 rounded-lg cursor-not-allowed"
+                                  >
+                                    <Edit className="w-3.5 h-3.5" />
+                                  </button>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    onClick={() => onEditInvoice(inv)}
+                                    title={language === 'bn' ? 'চালান ইডিট করুন (Edit Invoice)' : 'Edit Invoice'}
+                                    className="p-1.5 bg-amber-50 dark:bg-amber-950/60 text-amber-600 dark:text-amber-400 hover:bg-amber-100 dark:hover:bg-amber-900 rounded-lg transition-colors cursor-pointer"
+                                  >
+                                    <Edit className="w-3.5 h-3.5" />
+                                  </button>
+                                )
+                              )}
+
                               {/* 8. Delete Invoice Button (Gated by Delete Permission) */}
                               {hasDeletePermission ? (
                                 <button
@@ -1459,7 +1496,21 @@ export const SalesListView: React.FC<SalesListViewProps> = ({
                 </button>
               ) : <div />}
 
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
+                {onEditInvoice && hasEditPermission && !selectedInvoice.isInstallmentSale && selectedInvoice.paymentMethod !== 'INSTALLMENT' && (!selectedInvoice.returnStatus || selectedInvoice.returnStatus === 'NONE') && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const target = selectedInvoice;
+                      setSelectedInvoice(null);
+                      onEditInvoice(target);
+                    }}
+                    className="px-3.5 py-2 bg-amber-50 hover:bg-amber-100 dark:bg-amber-950/60 dark:hover:bg-amber-900 text-amber-700 dark:text-amber-300 rounded-xl text-xs font-bold transition-colors flex items-center gap-1.5 cursor-pointer border border-amber-200 dark:border-amber-800/60"
+                  >
+                    <Edit className="w-4 h-4" />
+                    <span>{language === 'bn' ? 'চালান ইডিট করুন' : 'Edit Invoice'}</span>
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={() => handlePrintA4(selectedInvoice)}

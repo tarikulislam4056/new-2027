@@ -50,7 +50,7 @@ import { isTabAllowed, canUserEdit } from './utils/permissions';
 
 // Toast and Icons
 import { CheckCircle2, AlertCircle, Info, AlertTriangle, Code2, Phone, MapPin } from 'lucide-react';
-import { Party, PartyType, Product, PurchaseInvoice } from './types';
+import { Party, PartyType, Product, PurchaseInvoice, SaleInvoice } from './types';
 
 const MainLayout: React.FC = () => {
   const { activeTab, toastMessage, setActiveTab, currentUser, companySettings, showToast, language } = useApp();
@@ -74,6 +74,17 @@ const MainLayout: React.FC = () => {
   const [isKeyboardShortcutsOpen, setIsKeyboardShortcutsOpen] = useState(false);
 
   const [purchaseInvoiceToEdit, setPurchaseInvoiceToEdit] = useState<PurchaseInvoice | null>(null);
+  const [saleInvoiceToEdit, setSaleInvoiceToEdit] = useState<SaleInvoice | null>(null);
+
+  // Clear pending edit invoices whenever user navigates away from entry views
+  useEffect(() => {
+    if (activeTab !== 'purchase-entry' && purchaseInvoiceToEdit) {
+      setPurchaseInvoiceToEdit(null);
+    }
+    if (activeTab !== 'pos' && saleInvoiceToEdit) {
+      setSaleInvoiceToEdit(null);
+    }
+  }, [activeTab, purchaseInvoiceToEdit, saleInvoiceToEdit]);
 
   // Active Report Category Selection
   const [activeReportKind, setActiveReportKind] = useState<ReportKind>('summary');
@@ -255,6 +266,12 @@ const MainLayout: React.FC = () => {
       case 'pos':
         return (
           <PosSaleView
+            key={saleInvoiceToEdit?.id || 'new-sale'}
+            initialData={saleInvoiceToEdit}
+            onCancelEdit={() => {
+              setSaleInvoiceToEdit(null);
+              setActiveTab('sales-list');
+            }}
             onOpenNewCustomerModal={() => handleOpenAddParty('CUSTOMER')}
           />
         );
@@ -263,6 +280,10 @@ const MainLayout: React.FC = () => {
         return (
           <SalesListView
             initialSubTab="active"
+            onEditInvoice={(inv) => {
+              setSaleInvoiceToEdit(inv);
+              setActiveTab('pos');
+            }}
             onOpenPaymentInModal={handleOpenPaymentIn}
           />
         );
@@ -313,6 +334,7 @@ const MainLayout: React.FC = () => {
       case 'purchase-entry':
         return (
           <PurchaseEntryView
+            key={purchaseInvoiceToEdit?.id || 'new-purchase'}
             initialData={purchaseInvoiceToEdit}
             onCancelEdit={() => {
               setPurchaseInvoiceToEdit(null);
@@ -339,10 +361,6 @@ const MainLayout: React.FC = () => {
         return (
           <PurchaseListView
             initialSubTab="deleted"
-            onEditInvoice={(pur) => {
-              setPurchaseInvoiceToEdit(pur);
-              setActiveTab('purchase-entry');
-            }}
             onOpenPaymentOutModal={handleOpenPaymentOut}
             onOpenReturnModal={() => setActiveTab('purchase-returns')}
           />

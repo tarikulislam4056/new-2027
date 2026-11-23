@@ -281,6 +281,27 @@ interface AppContextType {
     installmentPlanId?: string;
     date?: string;
   }) => SaleInvoice | null;
+  updateSaleInvoice: (invoiceId: string, invoiceData: {
+    invoiceNumber?: string;
+    customerId: string;
+    customerName: string;
+    customerPhone: string;
+    customerAddress?: string;
+    items: CartItem[];
+    subtotal: number;
+    discount: number;
+    discountType: 'percentage' | 'flat';
+    vatAmount: number;
+    grandTotal: number;
+    paidAmount: number;
+    dueAmount: number;
+    paymentMethod: PaymentMethod;
+    walletId: string;
+    notes?: string;
+    isInstallmentSale?: boolean;
+    installmentPlanId?: string;
+    date?: string;
+  }) => SaleInvoice | null;
   deleteSaleInvoice: (invoiceId: string, reason?: string) => boolean;
   restoreDeletedSaleInvoice: (deletedInvoiceId: string) => boolean;
   permanentlyDeleteArchivedInvoice: (deletedInvoiceId: string) => boolean;
@@ -322,6 +343,37 @@ interface AppContextType {
   deletedPurchaseInvoices: DeletedPurchaseInvoice[];
   getNextPurchaseBillNumber: () => string;
   createPurchaseInvoice: (purchaseData: {
+    billNumber?: string;
+    supplierId: string;
+    supplierName: string;
+    supplierPhone: string;
+    supplierInvoiceNo?: string;
+    items: {
+      productId: string;
+      productName: string;
+      unit: any;
+      conversionFactor?: number;
+      baseQuantity?: number;
+      quantity: number;
+      purchasePrice: number;
+      total: number;
+      batchNumber?: string;
+      expDate?: string;
+      mfgDate?: string;
+      salesPrice?: number;
+    }[];
+    subtotal: number;
+    discount: number;
+    taxAmount: number;
+    grandTotal: number;
+    paidAmount: number;
+    dueAmount: number;
+    paymentMethod: PaymentMethod;
+    walletId: string;
+    notes?: string;
+    date?: string;
+  }) => PurchaseInvoice | null;
+  updatePurchaseInvoice: (invoiceId: string, purchaseData: {
     billNumber?: string;
     supplierId: string;
     supplierName: string;
@@ -4745,6 +4797,523 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return newInvoice;
   };
 
+  const updateSaleInvoice = (
+    invoiceId: string,
+    data: {
+      invoiceNumber?: string;
+      customerId: string;
+      customerName: string;
+      customerPhone: string;
+      customerAddress?: string;
+      items: CartItem[];
+      subtotal: number;
+      discount: number;
+      discountType: 'percentage' | 'flat';
+      vatAmount: number;
+      grandTotal: number;
+      paidAmount: number;
+      dueAmount: number;
+      paymentMethod: PaymentMethod;
+      walletId: string;
+      notes?: string;
+      isInstallmentSale?: boolean;
+      installmentPlanId?: string;
+      date?: string;
+    }
+  ): SaleInvoice | null => {
+    const oldInv = saleInvoices.find(i => i.id === invoiceId);
+    if (!oldInv) {
+      showToast(language === 'bn' ? 'চালানটি খুঁজে পাওয়া যায়নি!' : 'Invoice not found!', 'error');
+      return null;
+    }
+
+    const rawInvNum = data.invoiceNumber?.trim() || oldInv.invoiceNumber;
+    const otherInvoices = saleInvoices.filter(i => i.id !== invoiceId);
+    const duplicateInv = checkDuplicateSaleInvoice(rawInvNum, otherInvoices);
+    if (duplicateInv) {
+      showToast(
+        language === 'bn'
+          ? `⚠️ ইনভয়েস নং "${rawInvNum}" ইতোমধ্যে অন্য চালানে ব্যবহৃত হয়েছে! অনুগ্রহ করে ভিন্ন নম্বর দিন।`
+          : `⚠️ Invoice number "${rawInvNum}" is already used by another invoice!`,
+        'error'
+      );
+      return null;
+    }
+
+    // Build virtual restored stock & batch stock from oldInv so editing existing items works accurately
+    const restoredStockByProduct = new Map<string, number>();
+    const restoredBatchesByProduct = new Map<string, ProductBatch[]>();
+    const oldBatchQtyMap = new Map<string, number>();
+
+    for (const prod of products) {
+      const oldSoldItems = oldInv.items.filter(i => i.productId === prod.id);
+      const clonedBatches = prod.batches ? prod.batches.map(b => ({ ...b })) : [];
+      let virtualStock = Number(prod.stock || 0);
+
+      for (const oldItem of oldSoldItems) {
+        const oldBaseQty = getBaseQuantity(oldItem, prod);
+        virtualStock = Number((virtualStock + oldBaseQty).toFixed(4));
+
+        if (clonedBatches.length > 0) {
+          let targetIdx = -1;
+          if (oldItem.batchId) {
+            targetIdx = clonedBatches.findIndex(b => b.id === oldItem.batchId);
+            const batchKey = `${prod.id}::${oldItem.batchId}`;
+            oldBatchQtyMap.set(batchKey, (oldBatchQtyMap.get(batchKey) || 0) + oldBaseQty);
+          } else if (oldItem.batchNumber) {
+            targetIdx = clonedBatches.findIndex(
+              b => b.batchNumber.trim().toLowerCase() === oldItem.batchNumber!.trim().toLowerCase()
+            );
+          }
+          if (targetIdx < 0) {
+            targetIdx = clonedBatches.findIndex(b => !isExpiredDate(b.expDate));
+          }
+          if (targetIdx < 0) targetIdx = 0;
+
+          if (targetIdx >= 0) {
+            clonedBatches[targetIdx].stock = Number((clonedBatches[targetIdx].stock + oldBaseQty).toFixed(4));
+          }
+        }
+      }
+
+      restoredStockByProduct.set(prod.id, virtualStock);
+      restoredBatchesByProduct.set(prod.id, clonedBatches);
+    }
+
+    // Validate new items against restored stock & expiry
+    const requestedByProduct = new Map<string, number>();
+    const requestedByBatch = new Map<string, number>();
+
+    for (const item of data.items) {
+      const prod = products.find(p => p.id === item.productId);
+      if (!prod) {
+        showToast(language === 'bn' ? 'পণ্য পাওয়া যায়নি!' : 'Product not found!', 'error');
+        return null;
+      }
+
+      const itemBaseQty = getBaseQuantity(item, prod);
+      const totalProdRequested = (requestedByProduct.get(prod.id) || 0) + itemBaseQty;
+      requestedByProduct.set(prod.id, totalProdRequested);
+
+      const virtualBatches = restoredBatchesByProduct.get(prod.id) || [];
+      const virtualStock = restoredStockByProduct.get(prod.id) ?? Number(prod.stock || 0);
+
+      if (item.batchId && virtualBatches.length > 0) {
+        const batch = virtualBatches.find(b => b.id === item.batchId);
+        if (!batch) {
+          showToast(
+            language === 'bn'
+              ? `"${item.name}" পণ্যের নির্ধারিত ব্যাচ পাওয়া যায়নি!`
+              : `Batch not found for "${item.name}"!`,
+            'error'
+          );
+          return null;
+        }
+
+        const batchReqKey = `${prod.id}::${item.batchId}`;
+        const totalBatchRequested = (requestedByBatch.get(batchReqKey) || 0) + itemBaseQty;
+        requestedByBatch.set(batchReqKey, totalBatchRequested);
+
+        const prevBatchQty = oldBatchQtyMap.get(batchReqKey) || 0;
+        if (isExpiredDate(batch.expDate) && totalBatchRequested > prevBatchQty + 1e-6) {
+          showToast(
+            language === 'bn'
+              ? `⚠️ "${item.name}"-এর নির্বাচিত ব্যাচ "${batch.batchNumber}"-এর মেয়াদ শেষ (${batch.expDate})!`
+              : `⚠️ Selected batch "${batch.batchNumber}" of "${item.name}" is expired (${batch.expDate})!`,
+            'error'
+          );
+          return null;
+        }
+
+        if (batch.stock + 1e-6 < totalBatchRequested) {
+          showToast(
+            language === 'bn'
+              ? `"${item.name}" পণ্যের ব্যাচ "${batch.batchNumber}"-এ পর্যাপ্ত মজুদ নেই (মজুদ: ${formatCleanNumber(batch.stock)} ${prod.unit}, বিক্রয় চাওয়া হয়েছে: ${formatCleanNumber(totalBatchRequested)} ${prod.unit})!`
+              : `Insufficient stock in batch "${batch.batchNumber}" for "${item.name}" (Stock: ${formatCleanNumber(batch.stock)} ${prod.unit}, requested: ${formatCleanNumber(totalBatchRequested)} ${prod.unit})!`,
+            'error'
+          );
+          return null;
+        }
+      } else if (virtualBatches.length > 0) {
+        const validBatches = virtualBatches.filter(b => (b.stock || 0) > 0 && !isExpiredDate(b.expDate));
+        const totalValidStock = validBatches.reduce((sum, b) => sum + (Number(b.stock) || 0), 0);
+
+        if (totalProdRequested > totalValidStock + 1e-6) {
+          showToast(
+            language === 'bn'
+              ? `⚠️ "${item.name}"-এর বিক্রয়যোগ্য (মেয়াদ ওকে) স্টক আছে মাত্র ${formatCleanNumber(totalValidStock)} ${prod.unit}। মোট বিক্রয় চাওয়া হয়েছে: ${formatCleanNumber(totalProdRequested)} ${prod.unit}!`
+              : `⚠️ Insufficient valid stock for "${item.name}". Only ${formatCleanNumber(totalValidStock)} ${prod.unit} available. Requested: ${formatCleanNumber(totalProdRequested)} ${prod.unit}`,
+            'error'
+          );
+          return null;
+        }
+      } else {
+        const oldProdQty = oldInv.items
+          .filter(oi => oi.productId === prod.id)
+          .reduce((s, oi) => s + getBaseQuantity(oi, prod), 0);
+        if (isExpiredDate(prod.expDate) && totalProdRequested > oldProdQty + 1e-6) {
+          showToast(
+            language === 'bn'
+              ? `⚠️ "${item.name}" পণ্যটির মেয়াদ উত্তীর্ণ হয়ে গেছে (Exp Date: ${prod.expDate})!`
+              : `⚠️ "${item.name}" is expired (Exp Date: ${prod.expDate})!`,
+            'error'
+          );
+          return null;
+        }
+        if (virtualStock + 1e-6 < totalProdRequested) {
+          showToast(
+            language === 'bn'
+              ? `অপর্যাপ্ত স্টক! "${item.name}" পণ্যের পর্যাপ্ত মজুদ নেই (মজুদ: ${formatCleanNumber(virtualStock)} ${prod.unit}, চাওয়া হয়েছে: ${formatCleanNumber(totalProdRequested)} ${prod.unit})`
+              : `Insufficient stock for "${item.name}". Available: ${formatCleanNumber(virtualStock)} ${prod.unit}, requested: ${formatCleanNumber(totalProdRequested)} ${prod.unit}`,
+            'error'
+          );
+          return null;
+        }
+      }
+    }
+
+    const isPureCreditSale =
+      data.paymentMethod === 'DUE' || data.walletId === 'due' || data.walletId === 'credit';
+    const effectivePaidAmount = isPureCreditSale ? 0 : Math.max(0, Number(data.paidAmount || 0));
+    const effectiveDueAmount = isPureCreditSale
+      ? Math.max(0, Number(data.grandTotal || 0))
+      : Math.max(0, Number(data.dueAmount ?? Math.max(0, Number(data.grandTotal || 0) - effectivePaidAmount)));
+    const effectivePaymentMethod: PaymentMethod =
+      effectivePaidAmount <= 0 && effectiveDueAmount > 0 ? 'DUE' : data.paymentMethod;
+    const effectiveWalletId = effectivePaidAmount > 0 ? (data.walletId || wallets[0]?.id || 'w-cash') : 'due';
+
+    // Net Customer Credit Limit Validation (subtracting oldInv due if same customer)
+    if (
+      effectiveDueAmount > 0 &&
+      data.customerId &&
+      data.customerId !== 'walk-in' &&
+      effectivePaymentMethod !== 'INSTALLMENT' &&
+      !data.isInstallmentSale
+    ) {
+      const customer = parties.find(p => p.id === data.customerId);
+      if (customer) {
+        const oldDueForSameCustomer =
+          oldInv.customerId === data.customerId &&
+          oldInv.dueAmount > 0 &&
+          oldInv.paymentMethod !== 'INSTALLMENT' &&
+          !oldInv.isInstallmentSale
+            ? oldInv.dueAmount
+            : 0;
+        const netAddedDue = Number((effectiveDueAmount - oldDueForSameCustomer).toFixed(2));
+        if (netAddedDue > 0) {
+          const creditCheck = checkCustomerCreditLimit(customer, netAddedDue, installmentSchemes);
+          if (!creditCheck.isAllowed) {
+            showToast(
+              language === 'bn'
+                ? `⚠️ ক্রেডিট লিমিট অতিক্রম করেছে! গ্রাহক "${customer.name}"-এর অনুমোদিত লিমিট ৳${creditCheck.creditLimit.toLocaleString()}।`
+                : `⚠️ Credit Limit Exceeded! Customer "${customer.name}" has limit of ৳${creditCheck.creditLimit.toLocaleString()}.`,
+              'error'
+            );
+            return null;
+          }
+        }
+      }
+    }
+
+    const invDate = data.date || oldInv.date || new Date().toISOString().split('T')[0];
+    const nowTime = new Date().toLocaleTimeString('en-US', { hour12: false });
+    const selectedWallet = effectivePaidAmount > 0 ? wallets.find(w => w.id === effectiveWalletId) : undefined;
+
+    let status: 'PAID' | 'PARTIAL' | 'DUE' = 'PAID';
+    if (effectiveDueAmount > 0 && effectivePaidAmount > 0) {
+      status = 'PARTIAL';
+    } else if (effectivePaidAmount === 0 && effectiveDueAmount > 0) {
+      status = 'DUE';
+    }
+
+    const editorName = currentUser?.fullName || currentUser?.username || 'Admin';
+
+    const updatedInvoice: SaleInvoice = {
+      ...oldInv,
+      invoiceNumber: rawInvNum,
+      date: invDate,
+      customerId: data.customerId,
+      customerName: data.customerName,
+      customerPhone: data.customerPhone,
+      customerAddress: data.customerAddress,
+      items: data.items,
+      subtotal: data.subtotal,
+      discount: data.discount,
+      discountType: data.discountType,
+      vatAmount: data.vatAmount,
+      grandTotal: data.grandTotal,
+      paidAmount: effectivePaidAmount,
+      dueAmount: effectiveDueAmount,
+      paymentMethod: effectivePaymentMethod,
+      walletId: effectiveWalletId,
+      walletName:
+        effectivePaidAmount > 0
+          ? (selectedWallet?.name || 'Cash')
+          : (language === 'bn' ? 'বাকী বিক্রয় (Credit)' : 'Due / Credit Sale'),
+      status,
+      notes: data.notes,
+      updatedBy: editorName,
+      completedBy: status === 'PAID' ? (oldInv.completedBy || editorName) : undefined,
+      contributors: [
+        ...(oldInv.contributors || []),
+        {
+          action: 'Updated Invoice',
+          actionBn: 'চালান ইডিট / আপডেট',
+          userName: editorName,
+          userId: currentUser?.id,
+          userRole: currentUser?.role,
+          timestamp: `${invDate} ${nowTime}`,
+        },
+      ],
+      isInstallmentSale: data.isInstallmentSale ?? oldInv.isInstallmentSale,
+      installmentPlanId: data.installmentPlanId ?? oldInv.installmentPlanId,
+    };
+
+    // 1. Reconcile product stock & batches in a single atomic pass (revert oldInv, then deduct updated data.items)
+    setProducts(prevProds =>
+      prevProds.map(prod => {
+        const oldSoldItems = oldInv.items.filter(i => i.productId === prod.id);
+        const newSoldItems = data.items.filter(i => i.productId === prod.id);
+        if (oldSoldItems.length === 0 && newSoldItems.length === 0) return prod;
+
+        const updatedBatches = prod.batches ? prod.batches.map(b => ({ ...b })) : [];
+        let newStock = Number(prod.stock || 0);
+
+        // Step A: Restore old invoice quantities
+        for (const oldItem of oldSoldItems) {
+          const oldBaseQty = getBaseQuantity(oldItem, prod);
+          newStock = Number((newStock + oldBaseQty).toFixed(4));
+          if (updatedBatches.length > 0) {
+            let targetIdx = -1;
+            if (oldItem.batchId) {
+              targetIdx = updatedBatches.findIndex(b => b.id === oldItem.batchId);
+            } else if (oldItem.batchNumber) {
+              targetIdx = updatedBatches.findIndex(
+                b => b.batchNumber.trim().toLowerCase() === oldItem.batchNumber!.trim().toLowerCase()
+              );
+            }
+            if (targetIdx < 0) targetIdx = updatedBatches.findIndex(b => !isExpiredDate(b.expDate));
+            if (targetIdx < 0) targetIdx = 0;
+            if (targetIdx >= 0) {
+              updatedBatches[targetIdx].stock = Number((updatedBatches[targetIdx].stock + oldBaseQty).toFixed(4));
+            }
+          }
+        }
+
+        // Step B: Deduct updated invoice quantities
+        for (const itemSold of newSoldItems) {
+          const soldBaseQty = getBaseQuantity(itemSold, prod);
+          if (updatedBatches.length > 0) {
+            let remQtyToDeduct = soldBaseQty;
+            if (itemSold.batchId) {
+              const bIdx = updatedBatches.findIndex(b => b.id === itemSold.batchId);
+              if (bIdx >= 0) {
+                const deduct = Math.min(updatedBatches[bIdx].stock, remQtyToDeduct);
+                updatedBatches[bIdx].stock = Math.max(0, Number((updatedBatches[bIdx].stock - deduct).toFixed(4)));
+                remQtyToDeduct = Number((remQtyToDeduct - deduct).toFixed(4));
+              }
+            }
+            if (remQtyToDeduct > 1e-6) {
+              const validBatchIndices = updatedBatches
+                .map((b, idx) => ({ b, idx }))
+                .filter(x => x.b.stock > 0 && !isExpiredDate(x.b.expDate))
+                .sort((a, b) => {
+                  if (a.b.expDate && b.b.expDate) return a.b.expDate.localeCompare(b.b.expDate);
+                  if (a.b.expDate) return -1;
+                  if (b.b.expDate) return 1;
+                  return (a.b.purchaseDate || '').localeCompare(b.b.purchaseDate || '');
+                });
+              for (const batchItem of validBatchIndices) {
+                if (remQtyToDeduct <= 1e-6) break;
+                const available = updatedBatches[batchItem.idx].stock;
+                const take = Math.min(available, remQtyToDeduct);
+                updatedBatches[batchItem.idx].stock = Math.max(0, Number((available - take).toFixed(4)));
+                remQtyToDeduct = Number((remQtyToDeduct - take).toFixed(4));
+              }
+            }
+          }
+          newStock = Math.max(0, Number((newStock - soldBaseQty).toFixed(4)));
+        }
+
+        const activeValidBatches = updatedBatches.filter(b => Number(b.stock) > 0 && !isExpiredDate(b.expDate));
+        activeValidBatches.sort((a, b) => (a.expDate || '').localeCompare(b.expDate || ''));
+        const earliestActiveExp =
+          activeValidBatches[0]?.expDate || (prod.batches && prod.batches.length > 0 ? '' : prod.expDate) || '';
+
+        return {
+          ...prod,
+          stock: newStock,
+          batches: updatedBatches.length > 0 ? updatedBatches : undefined,
+          expDate: earliestActiveExp,
+        };
+      })
+    );
+
+    // 2. Reconcile Customer Due Balance in a single pass
+    const oldAffectsParty =
+      Boolean(oldInv.customerId) &&
+      oldInv.customerId !== 'walk-in' &&
+      oldInv.dueAmount > 0 &&
+      oldInv.paymentMethod !== 'INSTALLMENT' &&
+      !oldInv.isInstallmentSale;
+    const newAffectsParty =
+      Boolean(data.customerId) &&
+      data.customerId !== 'walk-in' &&
+      effectiveDueAmount > 0 &&
+      effectivePaymentMethod !== 'INSTALLMENT' &&
+      !data.isInstallmentSale;
+
+    if (oldAffectsParty || newAffectsParty) {
+      setParties(prevParties =>
+        prevParties.map(p => {
+          let bal = p.currentBalance;
+          if (oldAffectsParty && p.id === oldInv.customerId) {
+            bal = Math.max(0, Number((bal - oldInv.dueAmount).toFixed(2)));
+          }
+          if (newAffectsParty && p.id === data.customerId) {
+            bal = Number((bal + effectiveDueAmount).toFixed(2));
+          }
+          return bal !== p.currentBalance ? { ...p, currentBalance: bal } : p;
+        })
+      );
+    }
+
+    // 3. Reconcile Wallet Balance in a single pass
+    const oldAffectsWallet =
+      oldInv.paidAmount > 0 &&
+      oldInv.paymentMethod !== 'DUE' &&
+      Boolean(oldInv.walletId) &&
+      oldInv.walletId !== 'due' &&
+      oldInv.walletId !== 'credit';
+    const newAffectsWallet = effectivePaidAmount > 0 && !isPureCreditSale && Boolean(selectedWallet);
+
+    if (oldAffectsWallet || newAffectsWallet) {
+      setWallets(prevWallets =>
+        prevWallets.map(w => {
+          let bal = w.balance;
+          if (oldAffectsWallet && w.id === oldInv.walletId) {
+            bal = Math.max(0, Number((bal - oldInv.paidAmount).toFixed(2)));
+          }
+          if (newAffectsWallet && selectedWallet && w.id === selectedWallet.id) {
+            bal = Number((bal + effectivePaidAmount).toFixed(2));
+          }
+          return bal !== w.balance ? { ...w, balance: bal } : w;
+        })
+      );
+    }
+
+    // 4. Update linked DayBook Entry IN-PLACE (preserve id & createdAt)
+    const updatedDayBookRemarks = data.notes
+      ? `Sale to ${data.customerName} (${data.notes})`
+      : effectivePaidAmount > 0
+        ? `POS Sale receipt from ${data.customerName} (Total: ৳${data.grandTotal.toLocaleString()}, Received: ৳${effectivePaidAmount.toLocaleString()}${effectiveDueAmount > 0 ? `, Due: ৳${effectiveDueAmount.toLocaleString()}` : ''})`
+        : `Credit Sale / বাকি বিক্রয় to ${data.customerName} (Total: ৳${data.grandTotal.toLocaleString()}, Due: ৳${effectiveDueAmount.toLocaleString()})`;
+
+    setDayBookEntries(prev => {
+      const matchIdx = prev.findIndex(
+        d => d.type === 'SALE' && (d.voucherNo === oldInv.invoiceNumber || d.referenceNo === oldInv.invoiceNumber)
+      );
+      if (matchIdx >= 0) {
+        return prev.map((d, idx) =>
+          idx === matchIdx
+            ? {
+                ...d,
+                voucherNo: rawInvNum,
+                referenceNo: rawInvNum,
+                date: invDate,
+                partyId: data.customerId,
+                partyName: data.customerName,
+                amount: effectivePaidAmount,
+                walletId: effectivePaidAmount > 0 && selectedWallet ? selectedWallet.id : 'due',
+                walletName: effectivePaidAmount > 0 && selectedWallet ? selectedWallet.name : 'Credit / বাকি',
+                remarks: updatedDayBookRemarks,
+              }
+            : d
+        );
+      }
+      return [
+        {
+          id: `db-${Date.now()}`,
+          voucherNo: rawInvNum,
+          date: invDate,
+          type: 'SALE',
+          flow: 'IN',
+          partyId: data.customerId,
+          partyName: data.customerName,
+          partyType: 'CUSTOMER',
+          amount: effectivePaidAmount,
+          walletId: effectivePaidAmount > 0 && selectedWallet ? selectedWallet.id : 'due',
+          walletName: effectivePaidAmount > 0 && selectedWallet ? selectedWallet.name : 'Credit / বাকি',
+          referenceNo: rawInvNum,
+          remarks: updatedDayBookRemarks,
+          createdBy: currentUser?.id || 'usr-1',
+          createdAt: `${invDate} ${nowTime}`,
+        },
+        ...prev,
+      ];
+    });
+
+    // 5. Update SaleInvoice IN-PLACE (NEVER append/duplicate!)
+    setSaleInvoices(prev => prev.map(inv => (inv.id === invoiceId ? updatedInvoice : inv)));
+
+    // 6. Sync Warranty Records cleanly for this invoice
+    const rebuiltWarranties: WarrantyRecord[] = [];
+    data.items.forEach(item => {
+      const prod = products.find(p => p.id === item.productId);
+      if (prod && (prod.hasWarranty || item.warrantyInfo)) {
+        const dur = prod.warrantyDuration || 1;
+        const unit = prod.warrantyUnit || 'YEARS';
+        const type = prod.warrantyType || 'REPLACEMENT';
+        const existingRec = warrantyRecords.find(
+          w => w.invoiceId === invoiceId && w.productId === prod.id
+        );
+        const serialNo =
+          item.serialNumber ||
+          existingRec?.serialNumber ||
+          `SN-${Math.floor(100000 + Math.random() * 900000)}`;
+
+        const startDate = new Date(invDate);
+        const expDateObj = new Date(startDate);
+        if (unit === 'DAYS') expDateObj.setDate(expDateObj.getDate() + dur);
+        else if (unit === 'MONTHS') expDateObj.setMonth(expDateObj.getMonth() + dur);
+        else if (unit === 'YEARS') expDateObj.setFullYear(expDateObj.getFullYear() + dur);
+        else if (unit === 'LIFETIME') expDateObj.setFullYear(expDateObj.getFullYear() + 100);
+
+        rebuiltWarranties.push({
+          id: existingRec?.id || `war-rec-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+          warrantyCode: existingRec?.warrantyCode || `WAR-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`,
+          invoiceId: updatedInvoice.id,
+          invoiceNumber: updatedInvoice.invoiceNumber,
+          saleDate: invDate,
+          productId: prod.id,
+          productName: prod.name,
+          sku: prod.sku || 'SKU-GEN',
+          serialNumber: serialNo,
+          customerId: data.customerId || 'walk-in',
+          customerName: data.customerName,
+          customerPhone: data.customerPhone || '',
+          warrantyType: type,
+          duration: dur,
+          durationUnit: unit,
+          startDate: invDate,
+          expiryDate: expDateObj.toISOString().split('T')[0],
+          status: existingRec?.status || 'ACTIVE',
+          terms: prod.warrantyTerms || 'Standard Product Warranty',
+          createdAt: existingRec?.createdAt || `${invDate} ${nowTime}`,
+        });
+      }
+    });
+    setWarrantyRecords(prev => [...rebuiltWarranties, ...prev.filter(w => w.invoiceId !== invoiceId)]);
+
+    showToast(
+      language === 'bn'
+        ? `বিক্রয় ইনভয়েস ${rawInvNum} সফলভাবে আপডেট হয়েছে!`
+        : `Sale invoice ${rawInvNum} updated successfully!`
+    );
+
+    return updatedInvoice;
+  };
+
   const deleteSaleInvoice = (invoiceId: string, reason?: string): boolean => {
     const inv = saleInvoices.find(i => i.id === invoiceId);
     if (!inv) {
@@ -6275,6 +6844,397 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         : `Purchase bill ${billNum} created successfully.`
     );
     return newPurchase;
+  };
+
+  const updatePurchaseInvoice = (
+    invoiceId: string,
+    data: {
+      billNumber?: string;
+      supplierId: string;
+      supplierName: string;
+      supplierPhone: string;
+      supplierInvoiceNo?: string;
+      items: {
+        productId: string;
+        productName: string;
+        unit: any;
+        conversionFactor?: number;
+        baseQuantity?: number;
+        quantity: number;
+        purchasePrice: number;
+        total: number;
+        batchNumber?: string;
+        expDate?: string;
+        mfgDate?: string;
+        salesPrice?: number;
+      }[];
+      subtotal: number;
+      discount: number;
+      taxAmount: number;
+      grandTotal: number;
+      paidAmount: number;
+      dueAmount: number;
+      paymentMethod: PaymentMethod;
+      walletId: string;
+      notes?: string;
+      date?: string;
+    }
+  ): PurchaseInvoice | null => {
+    const oldInv = purchaseInvoices.find(p => p.id === invoiceId);
+    if (!oldInv) {
+      showToast(language === 'bn' ? 'ক্রয় চালানটি খুঁজে পাওয়া যায়নি!' : 'Purchase bill not found!', 'error');
+      return null;
+    }
+
+    const rawBillNum = data.billNumber?.trim() || data.supplierInvoiceNo?.trim() || oldInv.billNumber;
+    const otherPurchases = purchaseInvoices.filter(p => p.id !== invoiceId);
+    const duplicateBill = checkDuplicatePurchaseInvoice(rawBillNum, otherPurchases);
+    if (duplicateBill) {
+      showToast(
+        language === 'bn'
+          ? `⚠️ বিল নং "${rawBillNum}" ইতোমধ্যে অন্য ক্রয় চালানে ব্যবহৃত হয়েছে!`
+          : `⚠️ Bill number "${rawBillNum}" is already used by another purchase bill!`,
+        'error'
+      );
+      return null;
+    }
+
+    const billNum = rawBillNum;
+    const purDate = data.date || oldInv.date || new Date().toISOString().split('T')[0];
+    const nowTime = new Date().toLocaleTimeString('en-US', { hour12: false });
+
+    const isPureCreditPurchase =
+      data.paymentMethod === 'DUE' || data.walletId === 'credit' || data.walletId === 'due';
+    if (!isPureCreditPurchase && Number(data.paidAmount || 0) < 0) {
+      showToast(language === 'bn' ? 'পরিশোধের পরিমাণ ঋণাত্মক হতে পারে না!' : 'Paid amount cannot be negative!', 'error');
+      return null;
+    }
+
+    const effectivePaidAmount = isPureCreditPurchase ? 0 : Math.max(0, Number(data.paidAmount || 0));
+    const effectiveDueAmount = isPureCreditPurchase
+      ? Math.max(0, Number(data.grandTotal || 0))
+      : Math.max(0, Number(data.dueAmount ?? Math.max(0, Number(data.grandTotal || 0) - effectivePaidAmount)));
+    const effectivePaymentMethod: PaymentMethod =
+      effectivePaidAmount <= 0 && effectiveDueAmount > 0 ? 'DUE' : data.paymentMethod;
+    const selectedWallet =
+      effectivePaidAmount > 0 ? (wallets.find(w => w.id === data.walletId) || wallets[0]) : undefined;
+
+    // Validate wallet balance accounting for refund from oldInv if same wallet
+    if (effectivePaidAmount > 0) {
+      if (!selectedWallet) {
+        showToast(
+          language === 'bn' ? 'পেমেন্ট ওয়ালেট খুঁজে পাওয়া যায়নি!' : 'Payment wallet not found!',
+          'error'
+        );
+        return null;
+      }
+      const oldPaidFromThisWallet =
+        oldInv.paidAmount > 0 &&
+        oldInv.paymentMethod !== 'DUE' &&
+        oldInv.walletId === selectedWallet.id
+          ? oldInv.paidAmount
+          : 0;
+      const availableBalance = Number((selectedWallet.balance + oldPaidFromThisWallet).toFixed(2));
+      if (availableBalance + 1e-6 < effectivePaidAmount) {
+        showToast(
+          language === 'bn'
+            ? `নির্বাচিত ওয়ালেটে (${selectedWallet.name}) পর্যাপ্ত ব্যালেন্স নেই! সম্ভাব্য ব্যালেন্স: ৳${availableBalance.toLocaleString()} | পরিশোধ: ৳${effectivePaidAmount.toLocaleString()}`
+            : `Insufficient balance in ${selectedWallet.name}! Available: ৳${availableBalance.toLocaleString()} | Trying to pay: ৳${effectivePaidAmount.toLocaleString()}.`,
+          'error'
+        );
+        return null;
+      }
+    }
+
+    let status: 'PAID' | 'PARTIAL' | 'DUE' = 'PAID';
+    if (effectiveDueAmount > 0 && effectivePaidAmount > 0) {
+      status = 'PARTIAL';
+    } else if (effectivePaidAmount === 0 && effectiveDueAmount > 0) {
+      status = 'DUE';
+    }
+
+    const editorName = currentUser?.fullName || currentUser?.username || 'Admin';
+
+    const updatedPurchase: PurchaseInvoice = {
+      ...oldInv,
+      billNumber: billNum,
+      supplierInvoiceNo: rawBillNum || data.supplierInvoiceNo || billNum,
+      date: purDate,
+      supplierId: data.supplierId,
+      supplierName: data.supplierName,
+      supplierPhone: data.supplierPhone,
+      items: data.items,
+      subtotal: data.subtotal,
+      discount: data.discount,
+      taxAmount: data.taxAmount,
+      grandTotal: data.grandTotal,
+      paidAmount: effectivePaidAmount,
+      dueAmount: effectiveDueAmount,
+      paymentMethod: effectivePaymentMethod,
+      walletId: effectivePaidAmount > 0 && selectedWallet ? selectedWallet.id : 'credit',
+      walletName: effectivePaidAmount > 0 && selectedWallet ? selectedWallet.name : 'Credit / বাকি',
+      status,
+      notes: data.notes,
+      updatedBy: editorName,
+      completedBy: status === 'PAID' ? (oldInv.completedBy || editorName) : undefined,
+      contributors: [
+        ...(oldInv.contributors || []),
+        {
+          action: 'Updated Purchase Bill',
+          actionBn: 'ক্রয় চালান ইডিট / আপডেট',
+          userName: editorName,
+          userId: currentUser?.id,
+          userRole: currentUser?.role,
+          timestamp: `${purDate} ${nowTime}`,
+        },
+      ],
+    };
+
+    // 1. Reconcile product stock & batches in a single atomic pass (revert oldInv, then apply updated items)
+    setProducts(prevProds =>
+      prevProds.map(prod => {
+        const oldBoughtItems = oldInv.items.filter(i => i.productId === prod.id);
+        const newBoughtItems = data.items.filter(i => i.productId === prod.id);
+        if (oldBoughtItems.length === 0 && newBoughtItems.length === 0) return prod;
+
+        let workingBatches = prod.batches ? prod.batches.map(b => ({ ...b })) : [];
+        let newTotalStock = Number(prod.stock || 0);
+
+        // Step A: Revert old purchase invoice quantities & batch entries
+        if (oldBoughtItems.length > 0) {
+          const totalOldBaseQty = oldBoughtItems.reduce((sum, i) => sum + getBaseQuantity(i, prod), 0);
+          if (workingBatches.length > 0) {
+            let remainingToDeduct = totalOldBaseQty;
+            workingBatches = workingBatches
+              .map(b => {
+                if (b.purchaseInvoiceNo === oldInv.billNumber && remainingToDeduct > 0) {
+                  const take = Math.min(b.stock, remainingToDeduct);
+                  remainingToDeduct = Number((remainingToDeduct - take).toFixed(4));
+                  return {
+                    ...b,
+                    stock: Math.max(0, Number((b.stock - take).toFixed(4))),
+                  };
+                }
+                return b;
+              })
+              .filter(b => b.stock > 0 || b.purchaseInvoiceNo !== oldInv.billNumber);
+
+            // If some old qty belonged to a merged batch that didn't match billNumber directly
+            if (remainingToDeduct > 1e-6) {
+              for (const oldIt of oldBoughtItems) {
+                if (remainingToDeduct <= 1e-6) break;
+                const oldBNum = oldIt.batchNumber?.trim().toLowerCase();
+                if (oldBNum) {
+                  const bIdx = workingBatches.findIndex(
+                    b => b.batchNumber.trim().toLowerCase() === oldBNum && (b.expDate || '') === (oldIt.expDate || '')
+                  );
+                  if (bIdx >= 0 && workingBatches[bIdx].stock > 0) {
+                    const take = Math.min(workingBatches[bIdx].stock, remainingToDeduct);
+                    workingBatches[bIdx].stock = Math.max(0, Number((workingBatches[bIdx].stock - take).toFixed(4)));
+                    remainingToDeduct = Number((remainingToDeduct - take).toFixed(4));
+                  }
+                }
+              }
+            }
+          }
+          newTotalStock = Math.max(0, Number((newTotalStock - totalOldBaseQty).toFixed(4)));
+        }
+
+        // Step B: Apply new/edited purchase items
+        let latestBasePurchasePrice = prod.purchasePrice;
+        let latestBatchNumber = prod.batchNumber || '';
+        let latestBatchExp = prod.expDate || '';
+
+        if (newBoughtItems.length > 0) {
+          if (workingBatches.length === 0 && newTotalStock > 0) {
+            workingBatches.push({
+              id: `batch-init-${prod.id}`,
+              batchNumber: prod.batchNumber || 'INIT-BATCH',
+              expDate: prod.expDate || '',
+              purchaseDate: prod.createdAt || purDate,
+              purchaseInvoiceNo: 'INIT-STOCK',
+              purchasePrice: prod.purchasePrice || 0,
+              salesPrice: prod.salesPrice || 0,
+              stock: newTotalStock,
+              initialStock: newTotalStock,
+              createdAt: prod.createdAt || `${purDate} ${nowTime}`,
+            });
+          }
+
+          for (const itemBought of newBoughtItems) {
+            const factor = getEffectiveConversionFactor(itemBought, prod);
+            const addedBaseQty = getBaseQuantity(itemBought, prod);
+            const basePurchasePrice =
+              Number(itemBought.purchasePrice || 0) > 0
+                ? computeNormalizedItemCost(Number(itemBought.purchasePrice), factor)
+                : prod.purchasePrice;
+            const baseSalesPrice = itemBought.salesPrice
+              ? computeNormalizedItemCost(Number(itemBought.salesPrice), factor)
+              : prod.salesPrice;
+
+            const bNum =
+              itemBought.batchNumber ||
+              (itemBought.expDate
+                ? `B-${itemBought.expDate.replace(/-/g, '')}`
+                : prod.batchNumber || `B-${purDate.replace(/-/g, '')}`);
+            const bExp = itemBought.expDate || prod.expDate || '';
+
+            const existingBatchIdx = workingBatches.findIndex(
+              b => b.batchNumber.trim().toLowerCase() === bNum.trim().toLowerCase() && (b.expDate || '') === bExp
+            );
+
+            if (existingBatchIdx >= 0) {
+              workingBatches[existingBatchIdx] = {
+                ...workingBatches[existingBatchIdx],
+                stock: Number((workingBatches[existingBatchIdx].stock + addedBaseQty).toFixed(4)),
+                purchasePrice: basePurchasePrice || workingBatches[existingBatchIdx].purchasePrice,
+                purchaseDate: purDate,
+                purchaseInvoiceNo: billNum,
+                supplierName: data.supplierName,
+                supplierId: data.supplierId,
+              };
+            } else {
+              workingBatches.push({
+                id: `batch-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+                batchNumber: bNum,
+                expDate: bExp,
+                mfgDate: itemBought.mfgDate || '',
+                purchaseDate: purDate,
+                purchaseInvoiceNo: billNum,
+                purchasePrice: basePurchasePrice || prod.purchasePrice,
+                salesPrice: baseSalesPrice,
+                stock: addedBaseQty,
+                initialStock: addedBaseQty,
+                supplierId: data.supplierId,
+                supplierName: data.supplierName,
+                createdAt: `${purDate} ${nowTime}`,
+              });
+            }
+
+            newTotalStock = Number((newTotalStock + addedBaseQty).toFixed(4));
+            latestBasePurchasePrice = basePurchasePrice || latestBasePurchasePrice;
+            latestBatchNumber = bNum;
+            if (bExp) latestBatchExp = bExp;
+          }
+        }
+
+        const activeBatchesWithExp = workingBatches.filter(b => Number(b.stock) > 0 && b.expDate);
+        activeBatchesWithExp.sort((a, b) => a.expDate.localeCompare(b.expDate));
+        const earliestActiveExp = activeBatchesWithExp[0]?.expDate || latestBatchExp || prod.expDate || '';
+
+        return {
+          ...prod,
+          stock: newTotalStock,
+          purchasePrice: latestBasePurchasePrice || prod.purchasePrice,
+          expDate: earliestActiveExp,
+          batchNumber: latestBatchNumber || prod.batchNumber,
+          batches: workingBatches.length > 0 ? workingBatches : undefined,
+        };
+      })
+    );
+
+    // 2. Reconcile Supplier Due Balance in a single pass
+    const oldAffectsSupplier = Boolean(oldInv.supplierId) && oldInv.dueAmount > 0;
+    const newAffectsSupplier = Boolean(data.supplierId) && effectiveDueAmount > 0;
+    if (oldAffectsSupplier || newAffectsSupplier) {
+      setParties(prevParties =>
+        prevParties.map(p => {
+          let bal = p.currentBalance;
+          if (oldAffectsSupplier && p.id === oldInv.supplierId) {
+            bal = Math.max(0, Number((bal - oldInv.dueAmount).toFixed(2)));
+          }
+          if (newAffectsSupplier && p.id === data.supplierId) {
+            bal = Number((bal + effectiveDueAmount).toFixed(2));
+          }
+          return bal !== p.currentBalance ? { ...p, currentBalance: bal } : p;
+        })
+      );
+    }
+
+    // 3. Reconcile Wallet Balance in a single pass (refund old payment, deduct new payment)
+    const oldAffectsWallet =
+      oldInv.paidAmount > 0 &&
+      oldInv.paymentMethod !== 'DUE' &&
+      Boolean(oldInv.walletId) &&
+      oldInv.walletId !== 'credit' &&
+      oldInv.walletId !== 'due';
+    const newAffectsWallet = effectivePaidAmount > 0 && !isPureCreditPurchase && Boolean(selectedWallet);
+
+    if (oldAffectsWallet || newAffectsWallet) {
+      setWallets(prevWallets =>
+        prevWallets.map(w => {
+          let bal = w.balance;
+          if (oldAffectsWallet && w.id === oldInv.walletId) {
+            bal = Number((bal + oldInv.paidAmount).toFixed(2));
+          }
+          if (newAffectsWallet && selectedWallet && w.id === selectedWallet.id) {
+            bal = Math.max(0, Number((bal - effectivePaidAmount).toFixed(2)));
+          }
+          return bal !== w.balance ? { ...w, balance: bal } : w;
+        })
+      );
+    }
+
+    // 4. Update linked DayBook Entry IN-PLACE (preserve id & createdAt)
+    const updatedDayBookRemarks = data.notes
+      ? `Purchase from ${data.supplierName} (${data.notes})`
+      : effectivePaidAmount > 0
+        ? `Purchase payment to ${data.supplierName} (Total: ৳${data.grandTotal.toLocaleString()}, Paid: ৳${effectivePaidAmount.toLocaleString()}${effectiveDueAmount > 0 ? `, Remaining Due: ৳${effectiveDueAmount.toLocaleString()}` : ''})`
+        : `Credit Purchase / বাকি ক্রয় from ${data.supplierName} (Total: ৳${data.grandTotal.toLocaleString()}, Due: ৳${effectiveDueAmount.toLocaleString()})`;
+
+    setDayBookEntries(prev => {
+      const matchIdx = prev.findIndex(
+        d => d.type === 'PURCHASE' && (d.voucherNo === oldInv.billNumber || d.referenceNo === oldInv.billNumber)
+      );
+      if (matchIdx >= 0) {
+        return prev.map((d, idx) =>
+          idx === matchIdx
+            ? {
+                ...d,
+                voucherNo: billNum,
+                referenceNo: billNum,
+                date: purDate,
+                partyId: data.supplierId,
+                partyName: data.supplierName,
+                amount: effectivePaidAmount,
+                walletId: effectivePaidAmount > 0 && selectedWallet ? selectedWallet.id : 'credit',
+                walletName: effectivePaidAmount > 0 && selectedWallet ? selectedWallet.name : 'Credit / বাকি',
+                remarks: updatedDayBookRemarks,
+              }
+            : d
+        );
+      }
+      return [
+        {
+          id: `db-${Date.now()}`,
+          voucherNo: billNum,
+          date: purDate,
+          type: 'PURCHASE',
+          flow: 'OUT',
+          partyId: data.supplierId,
+          partyName: data.supplierName,
+          partyType: 'SUPPLIER',
+          amount: effectivePaidAmount,
+          walletId: effectivePaidAmount > 0 && selectedWallet ? selectedWallet.id : 'credit',
+          walletName: effectivePaidAmount > 0 && selectedWallet ? selectedWallet.name : 'Credit / বাকি',
+          referenceNo: billNum,
+          remarks: updatedDayBookRemarks,
+          createdBy: currentUser?.id || 'usr-1',
+          createdAt: `${purDate} ${nowTime}`,
+        },
+        ...prev,
+      ];
+    });
+
+    // 5. Update PurchaseInvoice IN-PLACE (NEVER append/duplicate!)
+    setPurchaseInvoices(prev => prev.map(p => (p.id === invoiceId ? updatedPurchase : p)));
+
+    showToast(
+      language === 'bn'
+        ? `ক্রয় ভাউচার ${billNum} সফলভাবে আপডেট হয়েছে।`
+        : `Purchase bill ${billNum} updated successfully.`
+    );
+    return updatedPurchase;
   };
 
   const deletePurchaseInvoice = (invoiceId: string, reason?: string): boolean => {
@@ -9349,6 +10309,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         deleteParty,
         getNextSaleInvoiceNumber: () => generateSaleInvoiceNumber(saleInvoices),
         createSaleInvoice,
+        updateSaleInvoice,
         deleteSaleInvoice,
         restoreDeletedSaleInvoice,
         permanentlyDeleteArchivedInvoice,
@@ -9360,6 +10321,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         recordPaymentIn,
         getNextPurchaseBillNumber: () => generatePurchaseBillNumber(purchaseInvoices),
         createPurchaseInvoice,
+        updatePurchaseInvoice,
         deletePurchaseInvoice,
         restoreDeletedPurchaseInvoice,
         permanentlyDeleteArchivedPurchase,

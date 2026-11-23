@@ -1,10 +1,10 @@
 import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { useApp } from '../../context/AppContext';
 import { useTranslation } from '../../i18n/translations';
-import { Product, CartItem, PaymentMethod, UnitType, InstallmentFrequency, InstallmentSchedule, Quotation, DEFAULT_PRODUCT_UNITS } from '../../types';
+import { Product, CartItem, PaymentMethod, UnitType, InstallmentFrequency, InstallmentSchedule, Quotation, SaleInvoice, DEFAULT_PRODUCT_UNITS } from '../../types';
 import { CameraBarcodeScannerModal } from '../common/CameraBarcodeScannerModal';
 import confetti from 'canvas-confetti';
-import { isExpiredDate, getLocalDateString } from '../../utils/dateUtils';
+import { isExpiredDate, getLocalDateString, normalizeDateToISO } from '../../utils/dateUtils';
 import {
   hasDualUnit,
   getUnitMultiplier,
@@ -50,6 +50,8 @@ import {
 
 interface PosSaleViewProps {
   onOpenNewCustomerModal: () => void;
+  initialData?: SaleInvoice | null;
+  onCancelEdit?: () => void;
 }
 
 interface SaleRowItem {
@@ -82,7 +84,11 @@ interface SplitPaymentRow {
   amount: number;
 }
 
-export const PosSaleView: React.FC<PosSaleViewProps> = ({ onOpenNewCustomerModal }) => {
+export const PosSaleView: React.FC<PosSaleViewProps> = ({
+  onOpenNewCustomerModal,
+  initialData,
+  onCancelEdit,
+}) => {
   const {
     language,
     products,
@@ -93,9 +99,11 @@ export const PosSaleView: React.FC<PosSaleViewProps> = ({ onOpenNewCustomerModal
     formatCurrency,
     getNextSaleInvoiceNumber,
     createSaleInvoice,
+    updateSaleInvoice,
     createInstallmentScheme,
     openPrintModal,
     showToast,
+    setActiveTab,
     smsConfig,
     quotations,
     saleInvoices,
@@ -125,7 +133,9 @@ export const PosSaleView: React.FC<PosSaleViewProps> = ({ onOpenNewCustomerModal
   const [viewMode, setViewMode] = useState<'invoice' | 'touch-pos'>('invoice');
 
   // Top Controls: Cash vs Credit vs Installment Toggle
-  const [saleMode, setSaleMode] = useState<'CASH' | 'CREDIT' | 'INSTALLMENT'>('CASH');
+  const [saleMode, setSaleMode] = useState<'CASH' | 'CREDIT' | 'INSTALLMENT'>(
+    initialData ? (initialData.dueAmount > 0 ? 'CREDIT' : 'CASH') : 'CASH'
+  );
 
   // Master Hold Bills state
   const [heldBills, setHeldBills] = useState<{
@@ -165,10 +175,11 @@ export const PosSaleView: React.FC<PosSaleViewProps> = ({ onOpenNewCustomerModal
   // Party Selection
   const [searchPartyQuery, setSearchPartyQuery] = useState('');
   const [showPartyDropdown, setShowPartyDropdown] = useState(false);
-  const [selectedCustomerId, setSelectedCustomerId] = useState<string>('walk-in');
+  const [selectedCustomerId, setSelectedCustomerId] = useState<string>(initialData?.customerId || 'walk-in');
 
   // Invoice Meta
   const [invoiceNo, setInvoiceNo] = useState<string>(() => {
+    if (initialData?.invoiceNumber) return initialData.invoiceNumber;
     return getNextSaleInvoiceNumber ? getNextSaleInvoiceNumber() : 'INV-2026-0001';
   });
 
@@ -178,32 +189,66 @@ export const PosSaleView: React.FC<PosSaleViewProps> = ({ onOpenNewCustomerModal
     if (!trimmedInvoiceNo) return null;
     return (
       saleInvoices.find(
-        s => s.invoiceNumber && s.invoiceNumber.trim().toLowerCase() === trimmedInvoiceNo.toLowerCase()
+        s =>
+          s.id !== initialData?.id &&
+          s.invoiceNumber &&
+          s.invoiceNumber.trim().toLowerCase() === trimmedInvoiceNo.toLowerCase()
       ) || null
     );
-  }, [trimmedInvoiceNo, saleInvoices]);
+  }, [trimmedInvoiceNo, saleInvoices, initialData]);
   
   const [invoiceDate, setInvoiceDate] = useState<string>(() => {
+    if (initialData?.date) return normalizeDateToISO(initialData.date) || initialData.date;
     return getLocalDateString();
   });
 
   // Table Rows for items
-  const [items, setItems] = useState<SaleRowItem[]>([
-    {
-      id: 'row-1',
-      productId: '',
-      name: '',
-      barcode: '',
-      unit: 'Pcs',
-      quantity: 1,
-      unitPrice: 0,
-      discount: 0,
-      discountType: 'flat',
-      taxPercent: 0,
-      stock: 0,
-      total: 0,
-    },
-  ]);
+  const [items, setItems] = useState<SaleRowItem[]>(() => {
+    if (initialData && initialData.items && initialData.items.length > 0) {
+      return initialData.items.map((it, idx) => {
+        const matchedProd = products.find(p => p.id === it.productId);
+        const factor = it.conversionFactor || (matchedProd ? getUnitMultiplier(matchedProd, it.unit) : 1);
+        return {
+          id: `row-edit-${idx}`,
+          productId: it.productId,
+          name: it.name,
+          nameBn: it.nameBn,
+          barcode: it.barcode || matchedProd?.barcode || '',
+          unit: it.unit,
+          quantity: Number(it.quantity || 1),
+          unitPrice: Number(it.unitPrice || 0),
+          discount: Number(it.discount || 0),
+          discountType: it.discountType || 'flat',
+          taxPercent: Number(it.taxPercent || 0),
+          stock: matchedProd?.stock ?? it.stock ?? 0,
+          total: Number(it.total || 0),
+          batchId: it.batchId,
+          batchNumber: it.batchNumber,
+          expDate: it.expDate,
+          strength: it.strength,
+          manufacturer: it.manufacturer || matchedProd?.manufacturer,
+          purchasePrice: Number(it.purchasePrice ?? matchedProd?.purchasePrice ?? 0),
+          conversionFactor: factor,
+        };
+      });
+    }
+    return [
+      {
+        id: 'row-1',
+        productId: '',
+        name: '',
+        barcode: '',
+        unit: 'Pcs',
+        quantity: 1,
+        unitPrice: 0,
+        discount: 0,
+        discountType: 'flat',
+        taxPercent: 0,
+        stock: 0,
+        total: 0,
+      },
+    ];
+  });
 
   // Autocomplete state for item row
   const [activeItemRowSearch, setActiveItemRowSearch] = useState<string | null>(null);
@@ -219,20 +264,75 @@ export const PosSaleView: React.FC<PosSaleViewProps> = ({ onOpenNewCustomerModal
   const [isCameraScannerOpen, setIsCameraScannerOpen] = useState(false);
 
   // Payment splits
-  const [paymentSplits, setPaymentSplits] = useState<SplitPaymentRow[]>([
-    {
-      id: 'pay-1',
-      method: 'CASH',
-      walletId: wallets[0]?.id || 'w-cash',
-      amount: 0,
-    },
-  ]);
+  const [paymentSplits, setPaymentSplits] = useState<SplitPaymentRow[]>(() => {
+    if (initialData && initialData.paidAmount > 0) {
+      const safeMethod = initialData.paymentMethod === 'DUE' ? 'CASH' : initialData.paymentMethod;
+      const safeWalletId =
+        initialData.walletId && initialData.walletId !== 'due' && initialData.walletId !== 'credit'
+          ? initialData.walletId
+          : wallets[0]?.id || 'w-cash';
+      return [
+        {
+          id: 'pay-1',
+          method: safeMethod,
+          walletId: safeWalletId,
+          amount: initialData.paidAmount,
+        },
+      ];
+    }
+    if (initialData && initialData.dueAmount > 0) {
+      return [
+        {
+          id: 'pay-1',
+          method: 'DUE',
+          walletId: wallets[0]?.id || 'w-cash',
+          amount: 0,
+        },
+      ];
+    }
+    return [
+      {
+        id: 'pay-1',
+        method: 'CASH',
+        walletId: wallets[0]?.id || 'w-cash',
+        amount: 0,
+      },
+    ];
+  });
 
   // Delivery / Net / Description / Attachment / SMS
-  const [deliveryFee, setDeliveryFee] = useState<number>(0);
-  const [overallDiscountPercent, setOverallDiscountPercent] = useState<number>(0);
+  const initialParsedSaleNotes = (() => {
+    const raw = initialData?.notes || '';
+    const match = raw.match(/\s*\(Delivery Fee:\s*৳([\d.,]+)\)\s*$/);
+    if (match) {
+      return {
+        fee: parseFloat(match[1].replace(/,/g, '')) || 0,
+        cleanNotes: raw.slice(0, match.index).trim(),
+      };
+    }
+    return { fee: 0, cleanNotes: raw };
+  })();
+
+  const [deliveryFee, setDeliveryFee] = useState<number>(initialParsedSaleNotes.fee);
+  const [overallDiscountPercent, setOverallDiscountPercent] = useState<number>(() => {
+    if (initialData && isPharmacyMode && initialData.items && initialData.items.length > 0) {
+      const itemsSubSum = initialData.items.reduce((s, it) => s + Number(it.total || 0), 0);
+      const itemDiscSum = initialData.items.reduce((s, it) => {
+        const lineDisc =
+          it.discountType === 'flat'
+            ? (it.discount || 0) * it.quantity
+            : ((it.unitPrice * it.quantity) * (it.discount || 0)) / 100;
+        return s + lineDisc;
+      }, 0);
+      const extraDisc = Math.max(0, Number(initialData.discount || 0) - itemDiscSum);
+      if (extraDisc > 0.01 && itemsSubSum > 0) {
+        return Number(((extraDisc / itemsSubSum) * 100).toFixed(2));
+      }
+    }
+    return 0;
+  });
   const [sendDueSms, setSendDueSms] = useState<boolean>(smsConfig.enabled && smsConfig.autoSendOnSale);
-  const [description, setDescription] = useState<string>('');
+  const [description, setDescription] = useState<string>(initialParsedSaleNotes.cleanNotes);
   const [attachedImage, setAttachedImage] = useState<string | null>(null);
 
   // Installment & EMI State
@@ -1069,9 +1169,18 @@ export const PosSaleView: React.FC<PosSaleViewProps> = ({ onOpenNewCustomerModal
       return;
     }
 
-    // Check duplicate invoice number - Auto-correct if duplicate
+    // Check duplicate invoice number - warn if editing, auto-correct if creating new
     let finalInvoiceNo = trimmedInvoiceNo;
     if (duplicateInvoice) {
+      if (initialData) {
+        showToast(
+          language === 'bn'
+            ? `⚠️ ইনভয়েস নং "${finalInvoiceNo}" ইতোমধ্যে অন্য চালানে ব্যবহৃত হয়েছে! অনুগ্রহ করে ভিন্ন নম্বর দিন।`
+            : `⚠️ Invoice number "${finalInvoiceNo}" is already used by another invoice!`,
+          'error'
+        );
+        return;
+      }
       finalInvoiceNo = getNextSaleInvoiceNumber ? getNextSaleInvoiceNumber() : `INV-2026-${Date.now().toString().slice(-4)}`;
       setInvoiceNo(finalInvoiceNo);
       showToast(
@@ -1080,6 +1189,24 @@ export const PosSaleView: React.FC<PosSaleViewProps> = ({ onOpenNewCustomerModal
           : `⚠️ Invoice number was duplicate, automatically updated to unique number (${finalInvoiceNo}).`,
         'info'
       );
+    }
+
+    // Account for old invoice's base quantities when editing an existing sale invoice
+    const oldRestoredByProduct = new Map<string, number>();
+    const oldRestoredByBatch = new Map<string, number>();
+    if (initialData?.items) {
+      for (const oldItem of initialData.items) {
+        const product = products.find(p => p.id === oldItem.productId);
+        const oldBaseQty = getBaseQuantity(
+          { quantity: Number(oldItem.quantity) || 0, unit: oldItem.unit, conversionFactor: oldItem.conversionFactor },
+          product
+        );
+        oldRestoredByProduct.set(oldItem.productId, (oldRestoredByProduct.get(oldItem.productId) || 0) + oldBaseQty);
+        if (oldItem.batchId) {
+          const batchKey = `${oldItem.productId}::${oldItem.batchId}`;
+          oldRestoredByBatch.set(batchKey, (oldRestoredByBatch.get(batchKey) || 0) + oldBaseQty);
+        }
+      }
     }
 
     // Validate Stock & Batch-Level Expiry for every item (aggregated in base units)
@@ -1102,6 +1229,7 @@ export const PosSaleView: React.FC<PosSaleViewProps> = ({ onOpenNewCustomerModal
       const product = products.find(p => p.id === item.productId);
       if (!product) continue;
       const totalRequestedForProduct = requestedByProduct.get(item.productId) || 0;
+      const restoredForProduct = oldRestoredByProduct.get(item.productId) || 0;
 
       // 1. If cashier selected a specific batch
       if (item.batchId && product.batches && product.batches.length > 0) {
@@ -1116,8 +1244,13 @@ export const PosSaleView: React.FC<PosSaleViewProps> = ({ onOpenNewCustomerModal
           return;
         }
 
-        // Check if selected batch is expired
-        if (isExpiredDate(batch.expDate)) {
+        const batchKey = `${item.productId}::${item.batchId}`;
+        const totalRequestedForBatch = requestedByBatch.get(batchKey) || 0;
+        const restoredForBatch = oldRestoredByBatch.get(batchKey) || 0;
+        const effectiveBatchStock = Number((batch.stock + restoredForBatch).toFixed(4));
+
+        // Check if selected batch is expired (allow keeping existing qty if batch expired later)
+        if (isExpiredDate(batch.expDate) && totalRequestedForBatch > restoredForBatch + 1e-6) {
           showToast(
             language === 'bn'
               ? `⚠️ "${item.name}"-এর নির্বাচিত ব্যাচ "${batch.batchNumber}"-এর মেয়াদ শেষ (${batch.expDate})! মেয়াদোত্তীর্ণ ব্যাচ বিক্রি করা যাবে না। অনুগ্রহ করে মেয়াদ ওকে এমন ব্যাচ নির্বাচন করুন।`
@@ -1127,12 +1260,11 @@ export const PosSaleView: React.FC<PosSaleViewProps> = ({ onOpenNewCustomerModal
           return;
         }
 
-        const totalRequestedForBatch = requestedByBatch.get(`${item.productId}::${item.batchId}`) || 0;
-        if (totalRequestedForBatch > batch.stock) {
+        if (totalRequestedForBatch > effectiveBatchStock + 1e-6) {
           showToast(
             language === 'bn'
-              ? `"${item.name}" পণ্যের ব্যাচ "${batch.batchNumber}"-এ পর্যাপ্ত মজুদ নেই (মজুদ: ${formatStockWithUnit(batch.stock, product)}, বিক্রয়: ${formatCleanNumber(totalRequestedForBatch)} ${product.unit})!`
-              : `Insufficient stock in batch "${batch.batchNumber}" for "${item.name}" (Stock: ${formatStockWithUnit(batch.stock, product)})!`,
+              ? `"${item.name}" পণ্যের ব্যাচ "${batch.batchNumber}"-এ পর্যাপ্ত মজুদ নেই (মজুদ: ${formatStockWithUnit(effectiveBatchStock, product)}, বিক্রয়: ${formatCleanNumber(totalRequestedForBatch)} ${product.unit})!`
+              : `Insufficient stock in batch "${batch.batchNumber}" for "${item.name}" (Stock: ${formatStockWithUnit(effectiveBatchStock, product)})!`,
             'error'
           );
           return;
@@ -1140,7 +1272,7 @@ export const PosSaleView: React.FC<PosSaleViewProps> = ({ onOpenNewCustomerModal
       } else if (product.batches && product.batches.length > 0) {
         // 2. Auto FEFO - must have valid non-expired batches
         const validBatches = product.batches.filter(b => (b.stock || 0) > 0 && !isExpiredDate(b.expDate));
-        const totalValidStock = validBatches.reduce((s, b) => s + Number(b.stock || 0), 0);
+        const totalValidStock = Number((validBatches.reduce((s, b) => s + Number(b.stock || 0), 0) + restoredForProduct).toFixed(4));
 
         if (totalValidStock <= 0) {
           showToast(
@@ -1152,7 +1284,7 @@ export const PosSaleView: React.FC<PosSaleViewProps> = ({ onOpenNewCustomerModal
           return;
         }
 
-        if (totalRequestedForProduct > totalValidStock) {
+        if (totalRequestedForProduct > totalValidStock + 1e-6) {
           const expiredBatches = product.batches.filter(b => (b.stock || 0) > 0 && isExpiredDate(b.expDate));
           const expiredStock = expiredBatches.reduce((s, b) => s + Number(b.stock || 0), 0);
           showToast(
@@ -1165,7 +1297,8 @@ export const PosSaleView: React.FC<PosSaleViewProps> = ({ onOpenNewCustomerModal
         }
       } else {
         // 3. Simple product without batches
-        if (isExpiredDate(product.expDate)) {
+        const effectiveSimpleStock = Number((product.stock + restoredForProduct).toFixed(4));
+        if (isExpiredDate(product.expDate) && totalRequestedForProduct > restoredForProduct + 1e-6) {
           showToast(
             language === 'bn'
               ? `⚠️ "${item.name}" পণ্যটির মেয়াদ উত্তীর্ণ হয়ে গেছে (Exp Date: ${product.expDate})! মেয়াদোত্তীর্ণ পণ্য বিক্রয় করা যাবে না।`
@@ -1175,11 +1308,11 @@ export const PosSaleView: React.FC<PosSaleViewProps> = ({ onOpenNewCustomerModal
           return;
         }
 
-        if (totalRequestedForProduct > product.stock) {
+        if (totalRequestedForProduct > effectiveSimpleStock + 1e-6) {
           showToast(
             language === 'bn'
-              ? `"${product.name}" পণ্যের পর্যাপ্ত স্টক নেই (মজুদ: ${formatStockWithUnit(product.stock, product)}, প্রয়োজন: ${formatCleanNumber(totalRequestedForProduct)} ${product.unit})!`
-              : `Insufficient stock for "${product.name}" (Stock: ${formatStockWithUnit(product.stock, product)})!`,
+              ? `"${product.name}" পণ্যের পর্যাপ্ত স্টক নেই (মজুদ: ${formatStockWithUnit(effectiveSimpleStock, product)}, প্রয়োজন: ${formatCleanNumber(totalRequestedForProduct)} ${product.unit})!`
+              : `Insufficient stock for "${product.name}" (Stock: ${formatStockWithUnit(effectiveSimpleStock, product)})!`,
             'error'
           );
           return;
@@ -1375,7 +1508,7 @@ export const PosSaleView: React.FC<PosSaleViewProps> = ({ onOpenNewCustomerModal
     const activePaidSplit = paymentSplits.find(s => s.method !== 'DUE' && Number(s.amount || 0) > 0);
     const isFullCreditSale = totalReceivedAmount <= 0 || !activePaidSplit;
 
-    const newInvoice = createSaleInvoice({
+    const payload = {
       invoiceNumber: finalInvoiceNo || undefined,
       customerId: selectedCustomer?.id || 'walk-in',
       customerName: selectedCustomer?.name || 'Walk-in Customer',
@@ -1384,18 +1517,22 @@ export const PosSaleView: React.FC<PosSaleViewProps> = ({ onOpenNewCustomerModal
       items: cartItems,
       subtotal: grossSubtotal,
       discount: Number((totalDiscount + overallDiscountAmount).toFixed(2)),
-      discountType: 'flat',
+      discountType: 'flat' as const,
       vatAmount: 0,
       grandTotal: totalAmount,
       paidAmount: isFullCreditSale ? 0 : totalReceivedAmount,
       dueAmount: isFullCreditSale ? totalAmount : dueAmount,
-      paymentMethod: isFullCreditSale ? 'DUE' : activePaidSplit.method,
+      paymentMethod: (isFullCreditSale ? 'DUE' : activePaidSplit.method) as PaymentMethod,
       walletId: isFullCreditSale ? 'due' : activePaidSplit.walletId,
       notes: description + (deliveryFee > 0 ? ` (Delivery Fee: ৳${deliveryFee})` : ''),
       date: invoiceDate,
-    });
+    };
 
-    if (!newInvoice) return;
+    const savedInvoice = initialData
+      ? updateSaleInvoice(initialData.id, payload)
+      : createSaleInvoice(payload);
+
+    if (!savedInvoice) return;
 
     try {
       confetti({
@@ -1407,7 +1544,7 @@ export const PosSaleView: React.FC<PosSaleViewProps> = ({ onOpenNewCustomerModal
       // ignore
     }
 
-    if (sendDueSms && selectedCustomer?.phone && dueAmount > 0) {
+    if (!initialData && sendDueSms && selectedCustomer?.phone && dueAmount > 0) {
       showToast(
         language === 'bn'
           ? `বকেয়া এসএমএস পাঠানো হয়েছে: ${selectedCustomer.phone}`
@@ -1419,15 +1556,19 @@ export const PosSaleView: React.FC<PosSaleViewProps> = ({ onOpenNewCustomerModal
     if (!isSaveAndNew) {
       openPrintModal({
         type: companySettings.invoicePrintType === 'A4' ? 'INVOICE_A4' : 'POS_80MM',
-        title: `Sale Invoice #${newInvoice.invoiceNumber}`,
-        data: newInvoice,
+        title: `Sale Invoice #${savedInvoice.invoiceNumber}`,
+        data: savedInvoice,
       });
     }
 
-    showToast(
-      language === 'bn' ? 'বিক্রয় চালান সফলভাবে সংরক্ষিত হয়েছে!' : 'Sale invoice created successfully!',
-      'success'
-    );
+    if (initialData) {
+      if (onCancelEdit) {
+        onCancelEdit();
+      } else {
+        setActiveTab('sales-list');
+      }
+      return;
+    }
 
     handleResetForm();
   };
@@ -1442,9 +1583,17 @@ export const PosSaleView: React.FC<PosSaleViewProps> = ({ onOpenNewCustomerModal
         {/* 1. TOP HEADER: Title & Cash / Credit / Installments Switch */}
         {/* ========================================================================= */}
         <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between pb-4 border-b border-[#ECE8FF] dark:border-slate-800 gap-3">
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3 flex-wrap">
             <h2 className="text-xl sm:text-2xl font-bold text-slate-800 dark:text-white tracking-tight flex items-center gap-2">
-              <span>{language === 'bn' ? 'নতুন বিক্রয় (New Sales)' : 'New Sales'}</span>
+              <span>
+                {initialData
+                  ? language === 'bn'
+                    ? `বিক্রয় ইনভয়েস ইডিট (#${initialData.invoiceNumber})`
+                    : `Edit Invoice (#${initialData.invoiceNumber})`
+                  : language === 'bn'
+                    ? 'নতুন বিক্রয় (New Sales)'
+                    : 'New Sales'}
+              </span>
               {saleMode === 'INSTALLMENT' && (
                 <span className="px-2.5 py-0.5 rounded-full text-xs font-extrabold bg-purple-100 dark:bg-purple-900/50 text-purple-700 dark:text-purple-300 border border-purple-200 dark:border-purple-700 flex items-center gap-1">
                   <CalendarCheck className="w-3 h-3" />
@@ -1536,7 +1685,7 @@ export const PosSaleView: React.FC<PosSaleViewProps> = ({ onOpenNewCustomerModal
               {language === 'bn' ? 'বাকি (Credit)' : 'Credit'}
             </button>
 
-            {!isPharmacyMode && (
+            {!initialData && !isPharmacyMode && (
               <button
                 type="button"
                 onClick={() => setSaleMode('INSTALLMENT')}
@@ -2996,26 +3145,46 @@ export const PosSaleView: React.FC<PosSaleViewProps> = ({ onOpenNewCustomerModal
         {/* ========================================================================= */}
         {/* 7. BOTTOM ACTION BUTTONS: Save and New & Save */}
         {/* ========================================================================= */}
-        <div className="pt-6 flex items-center justify-end gap-3">
+        <div className="pt-6 flex flex-wrap items-center justify-end gap-3">
           
-          {/* Save and New Button */}
-          <button
-            type="button"
-            onClick={() => handleSaveInvoice(true)}
-            className="px-6 py-2.5 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 border border-[#DCD6FE] dark:border-slate-600 text-slate-700 dark:text-slate-200 rounded-xl text-xs sm:text-sm font-bold shadow-2xs transition-all cursor-pointer"
-          >
-            Save and New
-          </button>
+          {initialData && onCancelEdit && (
+            <button
+              type="button"
+              onClick={onCancelEdit}
+              className="px-6 py-2.5 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-xl text-xs sm:text-sm font-bold shadow-2xs transition-all cursor-pointer"
+            >
+              {language === 'bn' ? 'ইডিট বাতিল করুন' : 'Cancel Edit'}
+            </button>
+          )}
 
-          {/* Save Button (Vibrant Purple Pill Button) */}
+          {/* Save and New Button (only for new invoice creation) */}
+          {!initialData && (
+            <button
+              type="button"
+              onClick={() => handleSaveInvoice(true)}
+              className="px-6 py-2.5 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 border border-[#DCD6FE] dark:border-slate-600 text-slate-700 dark:text-slate-200 rounded-xl text-xs sm:text-sm font-bold shadow-2xs transition-all cursor-pointer"
+            >
+              Save and New
+            </button>
+          )}
+
+          {/* Save / Update Button */}
           <button
             type="button"
             onClick={() => handleSaveInvoice(false)}
-            className="px-8 py-2.5 bg-[#8A7CFA] hover:bg-[#7868F7] active:bg-[#6856E8] text-white rounded-xl text-xs sm:text-sm font-bold shadow-xs transition-all cursor-pointer flex items-center gap-2"
+            className={`px-8 py-2.5 ${initialData ? 'bg-amber-600 hover:bg-amber-700 active:bg-amber-800' : 'bg-[#8A7CFA] hover:bg-[#7868F7] active:bg-[#6856E8]'} text-white rounded-xl text-xs sm:text-sm font-bold shadow-xs transition-all cursor-pointer flex items-center gap-2`}
           >
-            <Printer className="w-4 h-4" />
+            {initialData ? <Check className="w-4 h-4" /> : <Printer className="w-4 h-4" />}
             <span>
-              {saleMode === 'INSTALLMENT' ? (language === 'bn' ? 'কিস্তি বিক্রয় সংরক্ষণ ও প্রিন্ট' : 'Save EMI & Print') : 'Save & Print'}
+              {initialData
+                ? language === 'bn'
+                  ? 'ইনভয়েস আপডেট করুন'
+                  : 'Update Invoice'
+                : saleMode === 'INSTALLMENT'
+                  ? language === 'bn'
+                    ? 'কিস্তি বিক্রয় সংরক্ষণ ও প্রিন্ট'
+                    : 'Save EMI & Print'
+                  : 'Save & Print'}
             </span>
           </button>
 
