@@ -44,6 +44,7 @@ import {
   triggerExpiryPushNotifications,
 } from '../../utils/expiryNotificationService';
 import { getLocalDateString, normalizeDateToISO } from '../../utils/dateUtils';
+import { computeNetSaleInvoiceMetrics, createSaleReturnLookup } from '../../utils/salesReturnHelpers';
 import { ViewTab } from '../../types';
 
 interface DashboardViewProps {
@@ -116,6 +117,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     setActiveTab,
     formatCurrency,
     saleInvoices,
+    saleReturns,
     purchaseInvoices,
     parties,
     wallets,
@@ -338,30 +340,17 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     return filteredSales.reduce((sum, s) => sum + (s.grandTotal ?? (s as any).total ?? s.subtotal ?? 0), 0);
   }, [filteredSales]);
 
-  // Total Profit (Based on Sales)
+  const saleReturnLookup = useMemo(() => {
+    return createSaleReturnLookup(saleReturns || [], products);
+  }, [saleReturns, products]);
+
+  // Total Profit (Based on Net Sales after subtracting any returned quantities/amounts)
   const totalProfit = useMemo(() => {
     return filteredSales.reduce((sum, invoice) => {
-      let invoiceCogs = 0;
-      invoice.items.forEach(item => {
-        let cost = item.purchasePrice;
-        if (cost === undefined || cost === null || cost === 0) {
-          const p = products.find(p => p.id === item.productId);
-          cost = p ? (p.purchasePrice || 0) : 0;
-        }
-        invoiceCogs += (cost * item.quantity);
-      });
-      
-      let invoiceDiscount = invoice.discount || 0;
-      if (invoice.discountType === 'percentage') {
-        invoiceDiscount = invoice.subtotal * (invoice.discount / 100);
-      }
-      
-      const revenue = (invoice.grandTotal !== undefined && invoice.grandTotal !== null)
-        ? Math.max(0, invoice.grandTotal - (invoice.vatAmount || 0) - (invoice.deliveryFee || 0))
-        : Math.max(0, invoice.subtotal - invoiceDiscount);
-      return sum + (revenue - invoiceCogs);
+      const metrics = computeNetSaleInvoiceMetrics(invoice, saleReturnLookup);
+      return sum + metrics.netProfit;
     }, 0);
-  }, [filteredSales, products]);
+  }, [filteredSales, saleReturnLookup]);
 
   // Total Expenses
   const totalExpenseAmount = useMemo(() => {
@@ -426,15 +415,17 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     });
 
     filteredSales.forEach(inv => {
-      inv.items.forEach(item => {
+      const metrics = computeNetSaleInvoiceMetrics(inv, saleReturnLookup);
+      metrics.items.forEach(({ item, netBaseQty, netTotal }) => {
+        if (netBaseQty <= 0 && netTotal <= 0) return;
         if (map[item.productId]) {
-          map[item.productId].qty += item.quantity;
-          map[item.productId].revenue += item.total;
+          map[item.productId].qty += netBaseQty;
+          map[item.productId].revenue += netTotal;
         } else {
           map[item.productId] = {
             name: item.name,
-            qty: item.quantity,
-            revenue: item.total,
+            qty: netBaseQty,
+            revenue: netTotal,
             stock: 0,
           };
         }
@@ -442,7 +433,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     });
 
     return Object.entries(map).map(([id, data]) => ({ id, ...data }));
-  }, [products, filteredSales]);
+  }, [products, filteredSales, saleReturnLookup]);
 
   const bestSellingProducts = useMemo(() => {
     return [...productSalesMap].sort((a, b) => b.qty - a.qty).slice(0, 3);

@@ -11,6 +11,7 @@ import {
   canUserPrintReportStatement,
 } from '../../utils/permissions';
 import { getBaseQuantity, formatStockWithUnit, formatCleanNumber } from '../../utils/unitConversion';
+import { computeNetSaleInvoiceMetrics, createSaleReturnLookup } from '../../utils/salesReturnHelpers';
 import {
   getUnifiedCategoryOptions,
   matchesCategoryFilter,
@@ -401,23 +402,25 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ initialReportType = 's
     });
   }, [expenseVouchers, pnlStartDate, pnlEndDate, globalStartDate, globalEndDate]);
 
-  // Overall Global Aggregates (Filtered by Date Range)
+  const saleReturnLookup = useMemo(() => {
+    return createSaleReturnLookup(saleReturns || [], products);
+  }, [saleReturns, products]);
+
+  const filteredSalesNetMetrics = useMemo(() => {
+    return filteredSalesInvoices.map(inv =>
+      computeNetSaleInvoiceMetrics(inv, saleReturnLookup, { fallbackEstimateCost: true })
+    );
+  }, [filteredSalesInvoices, saleReturnLookup]);
+
+  const filteredPnlNetMetrics = useMemo(() => {
+    return filteredPnlInvoices.map(inv =>
+      computeNetSaleInvoiceMetrics(inv, saleReturnLookup)
+    );
+  }, [filteredPnlInvoices, saleReturnLookup]);
+
+  // Overall Global Aggregates (Filtered by Date Range, net of Sales Returns)
   const totalSalesRevenue = filteredSalesInvoices.reduce((sum, s) => sum + s.grandTotal, 0);
-  const totalCostOfGoodsSold = filteredSalesInvoices
-    .flatMap(s => s.items)
-    .reduce((sum, item) => {
-      const prod = products.find(p => p.id === item.productId);
-      const baseQty = getBaseQuantity(item, prod);
-      const unitCost =
-        item.purchasePrice !== undefined && item.purchasePrice > 0
-          ? item.purchasePrice
-          : prod
-          ? prod.purchasePrice
-          : baseQty > 0
-          ? (item.total / baseQty) * 0.8
-          : item.unitPrice * 0.8;
-      return sum + unitCost * baseQty;
-    }, 0);
+  const totalCostOfGoodsSold = filteredSalesNetMetrics.reduce((sum, m) => sum + m.netCogs, 0);
   const grossProfit = totalSalesRevenue - totalCostOfGoodsSold;
   const totalExpenses = filteredExpenseVouchers.reduce((sum, e) => sum + e.amount, 0);
   const netProfit = grossProfit - totalExpenses;
@@ -452,15 +455,13 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ initialReportType = 's
         let cogs = 0;
         let invoiceCount = 0;
 
-        filteredSalesInvoices.forEach(inv => {
+        filteredSalesNetMetrics.forEach(metrics => {
           let itemFoundInInv = false;
-          inv.items.forEach(it => {
-            if (it.productId === prod.id) {
-              const baseQty = getBaseQuantity(it, prod);
-              soldQty += baseQty;
-              revenue += it.total;
-              const unitCost = (it.purchasePrice !== undefined && it.purchasePrice > 0) ? it.purchasePrice : (prod.purchasePrice || 0);
-              cogs += baseQty * unitCost;
+          metrics.items.forEach(({ item: it, netBaseQty, netTotal, netCogs }) => {
+            if (it.productId === prod.id && (netBaseQty > 0 || netTotal > 0)) {
+              soldQty += netBaseQty;
+              revenue += netTotal;
+              cogs += netCogs;
               itemFoundInInv = true;
             }
           });
@@ -484,7 +485,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ initialReportType = 's
       })
       .filter(item => !salesOnlyActive || item.soldQty > 0)
       .sort((a, b) => b.revenue - a.revenue || b.soldQty - a.soldQty);
-  }, [products, categories, filteredSalesInvoices, salesCategoryId, salesGeneric, salesManufacturer, salesSearch, salesOnlyActive, isPharmacyMode]);
+  }, [products, categories, filteredSalesNetMetrics, salesCategoryId, salesGeneric, salesManufacturer, salesSearch, salesOnlyActive, isPharmacyMode]);
 
   const selectedSalesProduct = useMemo(() => {
     if (salesItemId === 'ALL') return null;
@@ -506,27 +507,28 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ initialReportType = 's
       total: number;
     }[] = [];
 
-    filteredSalesInvoices.forEach(inv => {
-      inv.items.forEach(it => {
-        if (it.productId === selectedSalesProduct.id) {
+    filteredSalesNetMetrics.forEach(metrics => {
+      const inv = metrics.invoice;
+      metrics.items.forEach(({ item: it, netQuantity, netBaseQty, netTotal }) => {
+        if (it.productId === selectedSalesProduct.id && (netBaseQty > 0 || netTotal > 0)) {
           entries.push({
             date: inv.date,
             invoiceNumber: inv.invoiceNumber,
             customerName: inv.customerName,
             customerPhone: inv.customerPhone,
-            quantity: it.quantity,
-            baseQuantity: getBaseQuantity(it, selectedSalesProduct),
+            quantity: netQuantity,
+            baseQuantity: netBaseQty,
             unit: it.unit || selectedSalesProduct.unit || 'Pcs',
             unitPrice: it.unitPrice,
             discount: it.discount || 0,
-            total: it.total,
+            total: netTotal,
           });
         }
       });
     });
 
     return entries.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
-  }, [selectedSalesProduct, filteredSalesInvoices]);
+  }, [selectedSalesProduct, filteredSalesNetMetrics]);
 
   const totalSalesUnitsOverall = itemWiseSalesData.reduce((sum, item) => sum + item.soldQty, 0);
   const totalSalesRevenueOverall = itemWiseSalesData.reduce((sum, item) => sum + item.revenue, 0);
@@ -656,16 +658,12 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ initialReportType = 's
         let revenue = 0;
         let cogs = 0;
 
-        filteredPnlInvoices.forEach(inv => {
-          inv.items.forEach(it => {
-            if (it.productId === prod.id) {
-              const baseQty = getBaseQuantity(it, prod);
-              soldQty += baseQty;
-              revenue += it.total;
-              const unitCost = (it.purchasePrice !== undefined && it.purchasePrice > 0)
-                ? it.purchasePrice
-                : (prod.purchasePrice || 0);
-              cogs += (baseQty * unitCost);
+        filteredPnlNetMetrics.forEach(metrics => {
+          metrics.items.forEach(({ item: it, netBaseQty, netTotal, netCogs }) => {
+            if (it.productId === prod.id && (netBaseQty > 0 || netTotal > 0)) {
+              soldQty += netBaseQty;
+              revenue += netTotal;
+              cogs += netCogs;
             }
           });
         });
@@ -684,7 +682,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ initialReportType = 's
       })
       .filter(item => !pnlOnlyActive || item.soldQty > 0)
       .sort((a, b) => b.revenue - a.revenue || b.profit - a.profit);
-  }, [products, categories, filteredPnlInvoices, pnlCategoryId, pnlGeneric, pnlManufacturer, pnlSearch, pnlOnlyActive, isPharmacyMode]);
+  }, [products, categories, filteredPnlNetMetrics, pnlCategoryId, pnlGeneric, pnlManufacturer, pnlSearch, pnlOnlyActive, isPharmacyMode]);
 
   const selectedPnlProduct = useMemo(() => {
     if (pnlItemId === 'ALL') return null;
@@ -708,15 +706,12 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ initialReportType = 's
       margin: string;
     }[] = [];
 
-    filteredPnlInvoices.forEach(inv => {
-      inv.items.forEach(it => {
-        if (it.productId === selectedPnlProduct.id) {
-          const rev = it.total;
-          const baseQty = getBaseQuantity(it, selectedPnlProduct);
-          const unitCost = (it.purchasePrice !== undefined && it.purchasePrice > 0)
-            ? it.purchasePrice
-            : (selectedPnlProduct.purchasePrice || 0);
-          const cost = baseQty * unitCost;
+    filteredPnlNetMetrics.forEach(metrics => {
+      const inv = metrics.invoice;
+      metrics.items.forEach(({ item: it, netQuantity, netBaseQty, netTotal, unitCost, netCogs }) => {
+        if (it.productId === selectedPnlProduct.id && (netBaseQty > 0 || netTotal > 0)) {
+          const rev = netTotal;
+          const cost = netCogs;
           const prof = rev - cost;
           const mgn = rev > 0 ? ((prof / rev) * 100).toFixed(1) : '0';
 
@@ -724,8 +719,8 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ initialReportType = 's
             date: inv.date,
             invoiceNumber: inv.invoiceNumber,
             customerName: inv.customerName,
-            quantity: it.quantity,
-            baseQuantity: baseQty,
+            quantity: netQuantity,
+            baseQuantity: netBaseQty,
             unit: it.unit || selectedPnlProduct.unit || 'Pcs',
             unitPrice: it.unitPrice,
             revenue: rev,
@@ -739,7 +734,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ initialReportType = 's
     });
 
     return entries.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
-  }, [selectedPnlProduct, filteredPnlInvoices]);
+  }, [selectedPnlProduct, filteredPnlNetMetrics]);
 
   const totalPnlSoldQtyOverall = itemPnlData.reduce((sum, item) => sum + item.soldQty, 0);
   const totalPnlRevenueOverall = itemPnlData.reduce((sum, item) => sum + item.revenue, 0);
@@ -751,17 +746,17 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ initialReportType = 's
   // -------------------------------------------------------------
   // Other Tab Data (Categories, Ledger, Party)
   // -------------------------------------------------------------
-  // Category wise sales (Filtered by Date Range)
+  // Category wise sales (Filtered by Date Range, net of Sales Returns)
   const categorySales = useMemo(() => {
     return unifiedCategories.map(cat => {
       let totalCatRevenue = 0;
       let totalCatQty = 0;
-      filteredSalesInvoices.forEach(inv => {
-        inv.items.forEach(it => {
-          const p = products.find(prod => prod.id === it.productId);
+      filteredSalesNetMetrics.forEach(metrics => {
+        metrics.items.forEach(({ product: p, netBaseQty, netTotal }) => {
+          if (netBaseQty <= 0 && netTotal <= 0) return;
           if (p && matchesCategoryFilter(p, cat.id, categories)) {
-            totalCatRevenue += it.total;
-            totalCatQty += getBaseQuantity(it, p);
+            totalCatRevenue += netTotal;
+            totalCatQty += netBaseQty;
           }
         });
       });
@@ -771,7 +766,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ initialReportType = 's
         qty: totalCatQty,
       };
     });
-  }, [unifiedCategories, categories, filteredSalesInvoices, products]);
+  }, [unifiedCategories, categories, filteredSalesNetMetrics]);
 
   // Category wise purchases (Filtered by Date Range)
   const categoryPurchases = useMemo(() => {
@@ -990,14 +985,18 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ initialReportType = 's
       });
 
       saleReturns.forEach(ret => {
-        const dueAdj = Number(ret.partyDueReduced ?? ret.dueAdjusted ?? 0);
+        const totalDueAdj = Number(ret.partyDueReduced ?? ret.dueAdjusted ?? 0);
+        const dueAdj =
+          ret.invoiceGrandTotalDelta !== undefined
+            ? Math.max(0, Number((totalDueAdj - Number(ret.invoiceDueDelta || 0)).toFixed(2)))
+            : totalDueAdj;
         if (ret.customerId === selectedPartyObj.id && dueAdj > 0) {
           ledgerEntries.push({
             date: ret.date,
             type: 'SALE_RETURN',
             flow: 'IN',
             voucherNo: ret.returnNumber,
-            remarks: `Sales Return adjusted to due (${ret.items.length} items)`,
+            remarks: `Sales Return adjusted to prior due (${ret.items.length} items)`,
             debit: 0,
             credit: dueAdj,
             amount: dueAdj,

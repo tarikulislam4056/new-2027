@@ -3,6 +3,7 @@ import { useApp } from '../../context/AppContext';
 import { useTranslation } from '../../i18n/translations';
 import { Badge } from '../common/Badge';
 import { DatePeriodFilter } from '../common/DatePeriodFilter';
+import { AdminDeletedSqlVaultModal } from '../common/AdminDeletedSqlVaultModal';
 import { PurchaseInvoice, Product, DeletedPurchaseInvoice } from '../../types';
 import { canUserDelete, canUserEdit, canUserReturn } from '../../utils/permissions';
 import { getBaseQuantity, formatCleanNumber } from '../../utils/unitConversion';
@@ -38,6 +39,7 @@ import {
   ShieldCheck,
   RefreshCw,
   FileJson,
+  Database,
 } from 'lucide-react';
 
 interface PurchaseListViewProps {
@@ -139,6 +141,7 @@ export const PurchaseListView: React.FC<PurchaseListViewProps> = ({
   const [invoiceToRestore, setInvoiceToRestore] = useState<DeletedPurchaseInvoice | null>(null);
   const [invoiceToPermDelete, setInvoiceToPermDelete] = useState<DeletedPurchaseInvoice | null>(null);
   const [showClearAllModal, setShowClearAllModal] = useState(false);
+  const [showSqlVaultModal, setShowSqlVaultModal] = useState(false);
   const [selectedDeletedPurchase, setSelectedDeletedPurchase] = useState<DeletedPurchaseInvoice | null>(null);
   const [expandedRowKey, setExpandedRowKey] = useState<string | null>(null);
 
@@ -2305,6 +2308,18 @@ export const PurchaseListView: React.FC<PurchaseListViewProps> = ({
             </div>
 
             <div className="flex flex-wrap items-center gap-2">
+              {currentUser?.role === 'ADMIN' && (
+                <button
+                  type="button"
+                  onClick={() => setShowSqlVaultModal(true)}
+                  className="px-3.5 py-2 bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-950/60 dark:hover:bg-indigo-900/70 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800 rounded-lg text-xs font-bold shadow-xs flex items-center gap-1.5 transition-colors cursor-pointer"
+                  title={language === 'bn' ? 'আলাদা SQL ফাইল থেকে ডিলিটকৃত ক্রয় চালান দেখুন ও ব্যাক আনুন' : 'Browse & restore archived purchases from separate SQL file'}
+                >
+                  <Database className="w-4 h-4" />
+                  <span>{language === 'bn' ? 'SQL থেকে ব্যাক আনুন' : 'SQL Archive / Restore'}</span>
+                </button>
+              )}
+
               <button
                 type="button"
                 onClick={handlePrintDeletedList}
@@ -2530,8 +2545,8 @@ export const PurchaseListView: React.FC<PurchaseListViewProps> = ({
             <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-4">
               {currentUser?.role === 'ADMIN'
                 ? (language === 'bn'
-                    ? `চালান #${invoiceToDelete.billNumber} (${invoiceToDelete.supplierName}) অ্যাডমিন আইডি থেকে ডিলিট করলে স্টক ও ওয়ালেট সমন্বয় হবে, এটি আর সফটওয়্যারে দেখা যাবে না এবং আলাদা SQL ফাইলে (admin_deleted_records.sql) সেভ থাকবে।`
-                    : `Deleting bill #${invoiceToDelete.billNumber} as Admin will revert stock/wallet balances, remove it completely from the software, and save it in a separate SQL file (admin_deleted_records.sql).`)
+                    ? `চালান #${invoiceToDelete.billNumber} (${invoiceToDelete.supplierName}) ডিলিট করলে স্টক ও ওয়ালেট সমন্বয় হয়ে প্রথমে 'Delete Purchase' লিস্টে জমা থাকবে। সেখান থেকে ডিলিট করলে তা আলাদা SQL ফাইলে (admin_deleted_records.sql) সেভ থাকবে এবং ভবিষ্যতে প্রয়োজন হলে আবার ব্যাক আনা যাবে।`
+                    : `Deleting bill #${invoiceToDelete.billNumber} will revert stock/wallet balances and move it to the 'Delete Purchase' list first. Deleting it from there saves it into a separate SQL file (admin_deleted_records.sql) so it can be restored later.`)
                 : (language === 'bn'
                     ? `চালান #${invoiceToDelete.billNumber} (${invoiceToDelete.supplierName}) ডিলিট করলে স্টক এবং ওয়ালেট ব্যালেন্স পূর্বাবস্থায় ফিরে যাবে এবং এটি 'Delete Purchase' আর্কাইভে জমা হবে।`
                     : `Deleting bill #${invoiceToDelete.billNumber} will revert stock/wallet balances and archive it with full audit trail.`)}
@@ -2638,9 +2653,13 @@ export const PurchaseListView: React.FC<PurchaseListViewProps> = ({
               <span>{language === 'bn' ? 'স্থায়ীভাবে মুছে ফেলুন?' : 'Permanently Delete Archive?'}</span>
             </h3>
             <p className="text-xs text-zinc-600 dark:text-zinc-400 mb-6">
-              {language === 'bn'
-                ? `চালান #${invoiceToPermDelete.billNumber}-এর আর্কাইভ রেকর্ড চিরতরে মুছে ফেলা হবে। এটি আর পুনরুদ্ধার করা যাবে না।`
-                : `Permanently delete archived bill #${invoiceToPermDelete.billNumber}? This action cannot be undone.`}
+              {currentUser?.role === 'ADMIN'
+                ? (language === 'bn'
+                    ? `চালান #${invoiceToPermDelete.billNumber} ডিলিট লিস্ট থেকে মুছে আলাদা SQL ফাইলে (admin_deleted_records.sql) সংরক্ষিত থাকবে। ভবিষ্যতে প্রয়োজন হলে সেখান থেকে আবার ব্যাক আনতে পারবেন।`
+                    : `Remove bill #${invoiceToPermDelete.billNumber} from the Delete List and archive it in the separate SQL file (admin_deleted_records.sql)? You can restore it anytime later.`)
+                : (language === 'bn'
+                    ? `চালান #${invoiceToPermDelete.billNumber}-এর আর্কাইভ রেকর্ড ডিলিট লিস্ট থেকে মুছে ফেলা হবে।`
+                    : `Remove archived bill #${invoiceToPermDelete.billNumber} from Delete List?`)}
             </p>
             <div className="flex justify-end gap-3">
               <button
@@ -2653,13 +2672,12 @@ export const PurchaseListView: React.FC<PurchaseListViewProps> = ({
               <button
                 type="button"
                 onClick={() => {
-                  if (!hasDeletePermission) {
-                    showToast(language === 'bn' ? 'আর্কাইভ রেকর্ড স্থায়ীভাবে মুছে ফেলার অনুমতি নেই' : 'Permission required to permanently delete', 'error');
+                  if (!hasDeletePermission && currentUser?.role !== 'ADMIN') {
+                    showToast(language === 'bn' ? 'আর্কাইভ রেকর্ড ডিলিট লিস্ট থেকে মুছে ফেলার অনুমতি নেই' : 'Permission required to permanently delete', 'error');
                     setInvoiceToPermDelete(null);
                     return;
                   }
                   permanentlyDeleteArchivedPurchase(invoiceToPermDelete.id);
-                  showToast(language === 'bn' ? 'আর্কাইভ রেকর্ড স্থায়ীভাবে মুছে ফেলা হয়েছে' : 'Record permanently deleted', 'success');
                   setInvoiceToPermDelete(null);
                 }}
                 className="px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-xs font-bold cursor-pointer"
@@ -2680,9 +2698,13 @@ export const PurchaseListView: React.FC<PurchaseListViewProps> = ({
               <span>{language === 'bn' ? 'সমস্ত আর্কাইভ সাফ করুন?' : 'Clear All Deleted Purchases?'}</span>
             </h3>
             <p className="text-xs text-zinc-600 dark:text-zinc-400 mb-6">
-              {language === 'bn'
-                ? `আপনি কি নিশ্চিত যে সমস্ত ${deletedPurchaseInvoices.length}টি ডিলিট হওয়া ক্রয়ের রেকর্ড চিরতরে মুছে ফেলতে চান?`
-                : `Are you sure you want to clear all ${deletedPurchaseInvoices.length} archived deleted purchases?`}
+              {currentUser?.role === 'ADMIN'
+                ? (language === 'bn'
+                    ? `আপনি কি নিশ্চিত যে সমস্ত ${deletedPurchaseInvoices.length}টি ডিলিট হওয়া ক্রয়ের রেকর্ড এই লিস্ট থেকে সরিয়ে আলাদা SQL ফাইলে (admin_deleted_records.sql) সংরক্ষণ করতে চান? ভবিষ্যতে প্রয়োজন হলে সেখান থেকে ব্যাক আনা যাবে।`
+                    : `Move all ${deletedPurchaseInvoices.length} deleted purchase records out of the Delete List and archive them in admin_deleted_records.sql? You can restore them later if needed.`)
+                : (language === 'bn'
+                    ? `আপনি কি নিশ্চিত যে সমস্ত ${deletedPurchaseInvoices.length}টি ডিলিট হওয়া ক্রয়ের রেকর্ড ডিলিট লিস্ট থেকে মুছে ফেলতে চান?`
+                    : `Are you sure you want to clear all ${deletedPurchaseInvoices.length} archived deleted purchases?`)}
             </p>
             <div className="flex justify-end gap-3">
               <button
@@ -2695,13 +2717,12 @@ export const PurchaseListView: React.FC<PurchaseListViewProps> = ({
               <button
                 type="button"
                 onClick={() => {
-                  if (!hasDeletePermission) {
+                  if (!hasDeletePermission && currentUser?.role !== 'ADMIN') {
                     showToast(language === 'bn' ? 'আর্কাইভ সাফ করার অনুমতি নেই' : 'Permission required to clear all archive', 'error');
                     setShowClearAllModal(false);
                     return;
                   }
                   clearAllDeletedPurchases();
-                  showToast(language === 'bn' ? 'সমস্ত আর্কাইভ সাফ করা হয়েছে' : 'All archived purchases cleared', 'success');
                   setShowClearAllModal(false);
                 }}
                 className="px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-xs font-bold cursor-pointer"
@@ -2828,6 +2849,11 @@ export const PurchaseListView: React.FC<PurchaseListViewProps> = ({
           </div>
         </div>
       )}
+      <AdminDeletedSqlVaultModal
+        isOpen={showSqlVaultModal}
+        onClose={() => setShowSqlVaultModal(false)}
+        initialFilter="PURCHASE"
+      />
     </div>
   );
 };

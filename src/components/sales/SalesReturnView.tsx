@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { useApp } from '../../context/AppContext';
 import { useTranslation } from '../../i18n/translations';
 import { SaleInvoice, SaleReturn } from '../../types';
@@ -151,6 +151,12 @@ export const SalesReturnView: React.FC<SalesReturnViewProps> = ({ initialInvoice
   const [reason, setReason] = useState<string>('Defective or Customer exchange request');
 
   const selectedInvoice = saleInvoices.find(i => i.id === selectedInvoiceId);
+
+  useEffect(() => {
+    if (selectedInvoice?.walletId && wallets.some(w => w.id === selectedInvoice.walletId)) {
+      setRefundWalletId(selectedInvoice.walletId);
+    }
+  }, [selectedInvoice?.id, selectedInvoice?.walletId, wallets]);
 
   const selectedCustomer = useMemo(() => {
     if (!selectedInvoice || !selectedInvoice.customerId || selectedInvoice.customerId === 'walk-in') return undefined;
@@ -311,6 +317,9 @@ export const SalesReturnView: React.FC<SalesReturnViewProps> = ({ initialInvoice
     );
     const invGrandDelta = Math.min(selectedInvoice.grandTotal, returnAmount);
     const invDueDelta = Math.min(selectedInvoice.dueAmount, dueAdjusted);
+    const paidDeltaTarget = Math.max(0, invGrandDelta - invDueDelta);
+    const invPaidDelta = Math.min(selectedInvoice.paidAmount, paidDeltaTarget);
+    const newPaidAmount = Math.max(0, Number((selectedInvoice.paidAmount - invPaidDelta).toFixed(2)));
 
     return {
       dueAdjusted,
@@ -319,6 +328,7 @@ export const SalesReturnView: React.FC<SalesReturnViewProps> = ({ initialInvoice
       newCustomerReceivable,
       newGrandTotal: Math.max(0, Number((selectedInvoice.grandTotal - invGrandDelta).toFixed(2))),
       newBillDue: Math.max(0, Number((selectedInvoice.dueAmount - invDueDelta).toFixed(2))),
+      newPaidAmount,
     };
   }, [selectedInvoice, calculatedRefund, selectedCustomer, linkedEmiScheme, settlementMode, installmentSchemes]);
 
@@ -670,20 +680,26 @@ export const SalesReturnView: React.FC<SalesReturnViewProps> = ({ initialInvoice
                       </div>
                     </div>
 
-                    <div className="bg-white dark:bg-zinc-900 rounded-lg p-2.5 border border-rose-200 dark:border-rose-900/60">
+                    <div className="bg-white dark:bg-zinc-900 rounded-lg p-2.5 border border-emerald-200 dark:border-emerald-900/60">
                       <div className="text-[10px] text-zinc-500 flex items-center gap-1 font-semibold">
-                        <Wallet className="w-3 h-3 text-rose-600" />
-                        <span>{language === 'bn' ? 'নগদ / ওয়ালেট রিফান্ড' : 'Cash / Wallet Refund'}</span>
+                        <Wallet className="w-3 h-3 text-emerald-600" />
+                        <span>{language === 'bn' ? 'ইনভয়েস Cash In আপডেট (Cash Out: ৳০)' : 'Invoice Cash In (No Cash Out)'}</span>
                       </div>
-                      <div className="font-mono font-black text-rose-600 dark:text-rose-400 text-sm mt-0.5">
-                        {formatCurrency(settlementPreview.cashRefunded)}
+                      <div className="font-mono font-bold text-zinc-800 dark:text-zinc-200 text-xs mt-1 flex items-center gap-1 flex-wrap">
+                        <span>৳{selectedInvoice.paidAmount.toLocaleString()}</span>
+                        <ArrowRight className="w-3 h-3 text-zinc-400" />
+                        <span className="text-emerald-600 dark:text-emerald-400 font-black">
+                          ৳{(settlementPreview.newPaidAmount ?? selectedInvoice.paidAmount).toLocaleString()}
+                        </span>
                       </div>
                       <div className="text-[10px] text-zinc-500 truncate">
                         {settlementPreview.cashRefunded > 0
-                          ? wallets.find(w => w.id === refundWalletId)?.name || 'Wallet'
+                          ? language === 'bn'
+                            ? `${wallets.find(w => w.id === refundWalletId)?.name || 'Wallet'} থেকে ৳${settlementPreview.cashRefunded.toLocaleString()} সমন্বয়`
+                            : `Adjusted ৳${settlementPreview.cashRefunded.toLocaleString()} via ${wallets.find(w => w.id === refundWalletId)?.name || 'Wallet'}`
                           : language === 'bn'
-                            ? 'ওয়ালেট থেকে কাটবে না'
-                            : 'No wallet deduction'}
+                            ? 'ওয়ালেট বা ক্যাশ আউট হবে না'
+                            : 'No Cash Out entry'}
                       </div>
                     </div>
                   </div>

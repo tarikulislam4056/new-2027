@@ -2038,6 +2038,239 @@ COMMIT;
   return sql;
 }
 
+const DEFAULT_ADMIN_DELETED_COLUMNS = [
+  'archive_id',
+  'entity_type',
+  'source_table',
+  'record_id',
+  'reference_no',
+  'title',
+  'amount',
+  'deleted_at',
+  'deleted_at_iso',
+  'deleted_by_id',
+  'deleted_by_username',
+  'deleted_by_name',
+  'deleted_by_role',
+  'deletion_reason',
+  'shop_name',
+  'record_snapshot_json',
+];
+
+function unescapeSqlString(raw: string): string {
+  let out = '';
+  for (let i = 0; i < raw.length; i++) {
+    const ch = raw[i];
+    if (ch === '\\' && i + 1 < raw.length) {
+      const next = raw[i + 1];
+      i++;
+      switch (next) {
+        case '\\':
+          out += '\\';
+          break;
+        case "'":
+          out += "'";
+          break;
+        case '"':
+          out += '"';
+          break;
+        case '0':
+          out += '\0';
+          break;
+        case 'n':
+          out += '\n';
+          break;
+        case 'r':
+          out += '\r';
+          break;
+        case 't':
+          out += '\t';
+          break;
+        case 'Z':
+          out += '\x1a';
+          break;
+        default:
+          out += next;
+          break;
+      }
+    } else if (ch === "'" && i + 1 < raw.length && raw[i + 1] === "'") {
+      out += "'";
+      i++;
+    } else {
+      out += ch;
+    }
+  }
+  return out;
+}
+
+function parseSqlTuples(valuesBlock: string): Array<Array<string | null>> {
+  const rows: Array<Array<string | null>> = [];
+  let i = 0;
+  const len = valuesBlock.length;
+
+  while (i < len) {
+    // Skip until '('
+    while (i < len && valuesBlock[i] !== '(') {
+      i++;
+    }
+    if (i >= len) break;
+    i++; // consume '('
+
+    const row: Array<string | null> = [];
+    while (i < len) {
+      while (i < len && /\s/.test(valuesBlock[i])) i++;
+      if (i >= len) break;
+
+      if (valuesBlock[i] === ')') {
+        i++;
+        break;
+      }
+
+      if (valuesBlock[i] === "'") {
+        i++; // consume opening quote
+        let rawStr = '';
+        while (i < len) {
+          const c = valuesBlock[i];
+          if (c === '\\' && i + 1 < len) {
+            rawStr += c + valuesBlock[i + 1];
+            i += 2;
+            continue;
+          }
+          if (c === "'") {
+            if (i + 1 < len && valuesBlock[i + 1] === "'") {
+              rawStr += "''";
+              i += 2;
+              continue;
+            }
+            i++; // consume closing quote
+            break;
+          }
+          rawStr += c;
+          i++;
+        }
+        row.push(unescapeSqlString(rawStr));
+      } else {
+        let token = '';
+        while (i < len && valuesBlock[i] !== ',' && valuesBlock[i] !== ')') {
+          token += valuesBlock[i];
+          i++;
+        }
+        const trimmed = token.trim();
+        row.push(trimmed.toUpperCase() === 'NULL' ? null : trimmed);
+      }
+
+      while (i < len && /\s/.test(valuesBlock[i])) i++;
+      if (i < len && valuesBlock[i] === ',') {
+        i++;
+      } else if (i < len && valuesBlock[i] === ')') {
+        i++;
+        break;
+      }
+    }
+    if (row.length > 0) {
+      rows.push(row);
+    }
+  }
+
+  return rows;
+}
+
+/**
+ * Parses an exported `admin_deleted_records.sql` file back into `AdminDeletedRecord[]`
+ * so archived records can be inspected and restored into the ERP at any future time.
+ */
+export function parseAdminDeletedSqlDump(sqlText: string): AdminDeletedRecord[] {
+  if (!sqlText || typeof sqlText !== 'string') return [];
+
+  const byId = new Map<string, AdminDeletedRecord>();
+  const insertRegex = /INSERT\s+(?:IGNORE\s+)?INTO\s+`?admin_deleted_records`?\s*(?:\(([^)]+)\))?\s*VALUES\s*/gi;
+  let match: RegExpExecArray | null;
+
+  while ((match = insertRegex.exec(sqlText)) !== null) {
+    const colListRaw = match[1];
+    const columns = colListRaw
+      ? colListRaw.split(',').map(c => c.trim().replace(/^`|`$/g, '').toLowerCase())
+      : DEFAULT_ADMIN_DELETED_COLUMNS;
+
+    // Extract until the terminating semicolon outside single quotes
+    let idx = insertRegex.lastIndex;
+    let inQuote = false;
+    while (idx < sqlText.length) {
+      const ch = sqlText[idx];
+      if (inQuote) {
+        if (ch === '\\' && idx + 1 < sqlText.length) {
+          idx += 2;
+          continue;
+        }
+        if (ch === "'") {
+          if (idx + 1 < sqlText.length && sqlText[idx + 1] === "'") {
+            idx += 2;
+            continue;
+          }
+          inQuote = false;
+        }
+      } else {
+        if (ch === "'") {
+          inQuote = true;
+        } else if (ch === ';') {
+          break;
+        }
+      }
+      idx++;
+    }
+
+    const valuesSegment = sqlText.slice(insertRegex.lastIndex, idx);
+    insertRegex.lastIndex = idx + 1;
+
+    const tuples = parseSqlTuples(valuesSegment);
+    for (const tuple of tuples) {
+      const getVal = (colName: string): string => {
+        const colIdx = columns.indexOf(colName);
+        if (colIdx < 0 || colIdx >= tuple.length) return '';
+        return tuple[colIdx] ?? '';
+      };
+
+      const archiveId = getVal('archive_id');
+      const entityType = getVal('entity_type');
+      const recordId = getVal('record_id');
+      if (!archiveId || !entityType) continue;
+
+      let parsedSnapshot: any = null;
+      const snapRaw = getVal('record_snapshot_json');
+      if (snapRaw) {
+        try {
+          parsedSnapshot = JSON.parse(snapRaw);
+        } catch {
+          parsedSnapshot = null;
+        }
+      }
+
+      const amountNum = Number(getVal('amount'));
+      const rec: AdminDeletedRecord = {
+        archiveId,
+        entityType,
+        sourceTable: getVal('source_table') || 'unknown',
+        recordId: recordId || archiveId,
+        referenceNo: getVal('reference_no') || '',
+        title: getVal('title') || `${entityType} (${recordId})`,
+        amount: Number.isFinite(amountNum) ? amountNum : 0,
+        deletedAt: getVal('deleted_at') || '',
+        deletedAtIso: getVal('deleted_at_iso') || new Date().toISOString(),
+        deletedById: getVal('deleted_by_id') || '',
+        deletedByUsername: getVal('deleted_by_username') || 'admin',
+        deletedByName: getVal('deleted_by_name') || 'Admin',
+        deletedByRole: 'ADMIN',
+        deletionReason: getVal('deletion_reason') || '',
+        shopName: getVal('shop_name') || 'DokanPro ERP',
+        recordSnapshot: parsedSnapshot,
+      };
+      byId.set(rec.archiveId, rec);
+    }
+  }
+
+  return Array.from(byId.values());
+}
+
 /**
  * Downloads a string as a .sql file in browser with explicit UTF-8 BOM encoding to ensure no character corruption
  */
@@ -2258,6 +2491,58 @@ export function generateApiPhpScript(): string {
     "            if ($externalStorageDir) @file_put_contents($externalStorageDir . '/admin_deleted_records.sql', $sql, LOCK_EX);",
     "            @file_put_contents(__DIR__ . '/admin_deleted_records.sql', $sql, LOCK_EX);",
     '            echo json_encode([\'success\' => true, \'archivedCount\' => count($mergedArchive), \'fileName\' => \'admin_deleted_records.sql\'], JSON_UNESCAPED_UNICODE);',
+    '        }',
+    '        break;',
+    '',
+    "    case 'get_admin_deleted_archive':",
+    "        $adminRoleHeader = strtoupper((string)($_SERVER['HTTP_X_ADMIN_ROLE'] ?? ''));",
+    "        if ($adminRoleHeader !== 'ADMIN') {",
+    '            http_response_code(403);',
+    "            echo json_encode(['success' => false, 'message' => 'Admin authorization required'], JSON_UNESCAPED_UNICODE);",
+    '            exit();',
+    '        }',
+    "        $archiveJsonPath = $storageDir . '/admin_deleted_archive.json';",
+    '        $existingArchive = file_exists($archiveJsonPath) ? (json_decode(@file_get_contents($archiveJsonPath), true) ?: []) : [];',
+    "        echo json_encode(['success' => true, 'records' => array_values($existingArchive), 'totalCount' => count($existingArchive), 'fileName' => 'admin_deleted_records.sql'], JSON_UNESCAPED_UNICODE);",
+    '        break;',
+    '',
+    "    case 'remove_admin_deleted_archive':",
+    "        if ($_SERVER['REQUEST_METHOD'] === 'POST') {",
+    "            $adminRoleHeader = strtoupper((string)($_SERVER['HTTP_X_ADMIN_ROLE'] ?? ''));",
+    "            if ($adminRoleHeader !== 'ADMIN') {",
+    '                http_response_code(403);',
+    "                echo json_encode(['success' => false, 'message' => 'Admin authorization required'], JSON_UNESCAPED_UNICODE);",
+    '                exit();',
+    '            }',
+    "            $rawInput = file_get_contents('php://input');",
+    '            $input = json_decode($rawInput, true) ?: [];',
+    "            $idsToRemove = [];",
+    "            if (isset($input['archiveIds']) && is_array($input['archiveIds'])) $idsToRemove = $input['archiveIds'];",
+    "            elseif (!empty($input['archiveId'])) $idsToRemove = [$input['archiveId']];",
+    '            $removeMap = array_flip(array_map("strval", $idsToRemove));',
+    "            $archiveJsonPath = $storageDir . '/admin_deleted_archive.json';",
+    '            $existingArchive = file_exists($archiveJsonPath) ? (json_decode(@file_get_contents($archiveJsonPath), true) ?: []) : [];',
+    '            $remainingArchive = array_values(array_filter($existingArchive, function($r) use ($removeMap) {',
+    "                return is_array($r) && !isset($removeMap[(string)($r['archiveId'] ?? '')]);",
+    '            }));',
+    '            $archiveJsonStr = json_encode($remainingArchive, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);',
+    '            @file_put_contents($archiveJsonPath, $archiveJsonStr, LOCK_EX);',
+    "            if ($externalStorageDir) @file_put_contents($externalStorageDir . '/admin_deleted_archive.json', $archiveJsonStr, LOCK_EX);",
+    '            $escSql = function($v) {',
+    "                if ($v === null) return 'NULL';",
+    '                if (is_numeric($v) && !is_string($v)) return $v;',
+    '                return "\'" . str_replace(["\\\\", "\'", "\\r", "\\n", "\\0"], ["\\\\\\\\", "\\\\\'", "\\\\r", "\\\\n", "\\\\0"], (string)$v) . "\'";',
+    '            };',
+    '            $sql = "-- DokanPro ERP Separate Admin Deleted Records SQL Archive\\nSET NAMES utf8mb4;\\n";',
+    '            $sql .= "CREATE TABLE IF NOT EXISTS `admin_deleted_records` (`archive_id` varchar(100) NOT NULL PRIMARY KEY, `entity_type` varchar(80) NOT NULL, `source_table` varchar(80) NOT NULL, `record_id` varchar(120) NOT NULL, `reference_no` varchar(150) DEFAULT NULL, `title` varchar(255) DEFAULT NULL, `amount` decimal(14,2) NOT NULL DEFAULT 0.00, `deleted_at` varchar(80) NOT NULL, `deleted_at_iso` varchar(80) NOT NULL, `deleted_by_id` varchar(80) DEFAULT NULL, `deleted_by_username` varchar(120) DEFAULT NULL, `deleted_by_name` varchar(180) DEFAULT NULL, `deleted_by_role` varchar(40) NOT NULL DEFAULT \'ADMIN\', `deletion_reason` text DEFAULT NULL, `shop_name` varchar(255) DEFAULT NULL, `record_snapshot_json` longtext NOT NULL, `archived_timestamp` timestamp DEFAULT CURRENT_TIMESTAMP) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;\\n\\n";',
+    '            foreach ($remainingArchive as $r) {',
+    "                $snap = json_encode($r['recordSnapshot'] ?? [], JSON_UNESCAPED_UNICODE);",
+    '                $sql .= "INSERT IGNORE INTO `admin_deleted_records` (`archive_id`, `entity_type`, `source_table`, `record_id`, `reference_no`, `title`, `amount`, `deleted_at`, `deleted_at_iso`, `deleted_by_id`, `deleted_by_username`, `deleted_by_name`, `deleted_by_role`, `deletion_reason`, `shop_name`, `record_snapshot_json`) VALUES (" . $escSql($r[\'archiveId\'] ?? \'\') . ", " . $escSql($r[\'entityType\'] ?? \'\') . ", " . $escSql($r[\'sourceTable\'] ?? \'\') . ", " . $escSql($r[\'recordId\'] ?? \'\') . ", " . $escSql($r[\'referenceNo\'] ?? \'\') . ", " . $escSql($r[\'title\'] ?? \'\') . ", " . (float)($r[\'amount\'] ?? 0) . ", " . $escSql($r[\'deletedAt\'] ?? \'\') . ", " . $escSql($r[\'deletedAtIso\'] ?? \'\') . ", " . $escSql($r[\'deletedById\'] ?? \'\') . ", " . $escSql($r[\'deletedByUsername\'] ?? \'admin\') . ", " . $escSql($r[\'deletedByName\'] ?? \'Admin\') . ", \'ADMIN\', " . $escSql($r[\'deletionReason\'] ?? \'\') . ", " . $escSql($r[\'shopName\'] ?? \'\') . ", " . $escSql($snap) . ");\\n";',
+    '            }',
+    "            @file_put_contents($storageDir . '/admin_deleted_records.sql', $sql, LOCK_EX);",
+    "            if ($externalStorageDir) @file_put_contents($externalStorageDir . '/admin_deleted_records.sql', $sql, LOCK_EX);",
+    "            @file_put_contents(__DIR__ . '/admin_deleted_records.sql', $sql, LOCK_EX);",
+    "            echo json_encode(['success' => true, 'remainingCount' => count($remainingArchive), 'records' => $remainingArchive], JSON_UNESCAPED_UNICODE);",
     '        }',
     '        break;',
     '',

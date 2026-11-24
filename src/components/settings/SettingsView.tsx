@@ -7,6 +7,7 @@ import { INVOICE_COLOR_PRESETS, INVOICE_TEMPLATE_PRESETS, getInvoiceTheme, getIn
 import { DASHBOARD_COLOR_THEMES, DashboardColorTheme } from '../../utils/brandTheme';
 import { generateFullSqlDump, generateFreshCleanSqlDump, downloadSqlFile, generateApiPhpScript } from '../../utils/sqlExporter';
 import { initialCompanySettings } from '../../data/mockInitialData';
+import { AdminDeletedSqlVaultModal } from '../common/AdminDeletedSqlVaultModal';
 import {
   Settings,
   Building2,
@@ -59,6 +60,7 @@ import {
   Pill,
   Store,
   Keyboard,
+  ArchiveRestore,
 } from 'lucide-react';
 
 const SMS_PROVIDERS: { id: SmsProvider; name: string; nameBn: string; description: string; defaultUrl?: string; guideBn: string }[] = [
@@ -218,6 +220,7 @@ export const SettingsView: React.FC = () => {
 
   const [activeTab, setActiveTab] = useState<'profile' | 'invoice-design' | 'sms-api' | 'sms-logs' | 'database-sql' | 'shortcuts'>('profile');
   const [showAddCustomProviderModal, setShowAddCustomProviderModal] = useState(false);
+  const [showSqlVaultModal, setShowSqlVaultModal] = useState(false);
   const [isExportingSql, setIsExportingSql] = useState(false);
   const [editableShortcuts, setEditableShortcuts] = useState(() => {
     return companySettings.keyboardShortcuts || initialCompanySettings.keyboardShortcuts || [];
@@ -3355,19 +3358,34 @@ export const SettingsView: React.FC = () => {
               </button>
 
               {currentUser?.role === 'ADMIN' && (
-                <button
-                  type="button"
-                  onClick={() => downloadAdminDeletedSqlFile()}
-                  className="inline-flex items-center justify-center gap-2 px-4 py-2 bg-rose-950/80 hover:bg-rose-900 active:bg-rose-950 text-rose-200 rounded-xl text-xs font-bold border border-rose-700/70 transition-all cursor-pointer"
-                  title="অ্যাডমিন আইডি থেকে ডিলিট হওয়া ডাটার আলাদা SQL ফাইল ডাউনলোড করুন"
-                >
-                  <Shield className="w-4 h-4 text-rose-400" />
-                  <span>
-                    {language === 'bn'
-                      ? 'অ্যাডমিন ডিলিট SQL ফাইল (admin_deleted_records.sql)'
-                      : 'Admin Deleted SQL (admin_deleted_records.sql)'}
-                  </span>
-                </button>
+                <>
+                  <button
+                    type="button"
+                    onClick={() => setShowSqlVaultModal(true)}
+                    className="inline-flex items-center justify-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 active:bg-indigo-800 text-white rounded-xl text-xs font-bold border border-indigo-500/60 transition-all cursor-pointer"
+                    title="আলাদা SQL ফাইল থেকে ডিলিটকৃত ডাটা দেখুন ও পুনরায় ব্যাক আনুন"
+                  >
+                    <ArchiveRestore className="w-4 h-4" />
+                    <span>
+                      {language === 'bn'
+                        ? 'SQL থেকে ব্যাক আনুন (Restore Vault)'
+                        : 'Browse & Restore Deleted SQL'}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => downloadAdminDeletedSqlFile()}
+                    className="inline-flex items-center justify-center gap-2 px-4 py-2 bg-rose-950/80 hover:bg-rose-900 active:bg-rose-950 text-rose-200 rounded-xl text-xs font-bold border border-rose-700/70 transition-all cursor-pointer"
+                    title="অ্যাডমিন আইডি থেকে ডিলিট হওয়া ডাটার আলাদা SQL ফাইল ডাউনলোড করুন"
+                  >
+                    <Shield className="w-4 h-4 text-rose-400" />
+                    <span>
+                      {language === 'bn'
+                        ? 'অ্যাডমিন ডিলিট SQL ফাইল (admin_deleted_records.sql)'
+                        : 'Admin Deleted SQL (admin_deleted_records.sql)'}
+                    </span>
+                  </button>
+                </>
               )}
             </div>
           </div>
@@ -4011,26 +4029,36 @@ npm start
                   <div>
                     <div className="flex items-center gap-2 font-bold text-rose-800 dark:text-rose-300 mb-1">
                       <Shield className="w-4 h-4 text-rose-600 dark:text-rose-400" />
-                      <span>4. admin_deleted_records.sql ({language === 'bn' ? 'আলাদা অ্যাডমিন ডিলিট SQL আর্কাইভ' : 'Separate Admin Deleted SQL Archive'})</span>
+                      <span>4. admin_deleted_records.sql ({language === 'bn' ? 'আলাদা অ্যাডমিন ডিলিট SQL আর্কাইভ ও রিস্টোর' : 'Separate Admin Deleted SQL Archive & Restore'})</span>
                     </div>
                     <p className="text-[11px] text-slate-600 dark:text-slate-400">
                       {language === 'bn'
-                        ? 'অ্যাডমিন আইডি থেকে যেকোনো রেকর্ড ডিলিট করলে তা সফটওয়্যারে আর দেখা যায় না এবং স্বয়ংক্রিয়ভাবে এই আলাদা SQL ফাইলে সংরক্ষিত থাকে। এখান থেকে সরাসরি SQL ফাইলটি ডাউনলোড করতে পারবেন।'
-                        : 'Records deleted by an Admin ID are completely hidden from the software and automatically saved in this separate SQL file. Download the standalone SQL dump directly from here.'}
+                        ? 'অ্যাডমিন আইডি দিয়ে চালান ডিলিট করলে তা প্রথমে ডিলিট লিস্টে থাকে, এবং ডিলিট লিস্ট থেকে মুছে দিলে স্বয়ংক্রিয়ভাবে এই আলাদা SQL ফাইলে সংরক্ষিত হয়। ভবিষ্যতে প্রয়োজন হলে এখান থেকেই সরাসরি যেকোনো রেকর্ড ব্যাক আনতে অথবা SQL ফাইল ডাউনলোড/ইমপোর্ট করতে পারবেন।'
+                        : 'Invoices deleted by Admin stay in the Delete List first, and deleting from the Delete List stores them in this separate SQL file. You can browse, import a .sql dump, download, or restore any record back anytime.'}
                     </p>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => downloadAdminDeletedSqlFile()}
-                    className="w-full sm:w-auto sm:self-start px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-lg font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer text-xs"
-                  >
-                    <Download className="w-3.5 h-3.5" />
-                    <span>
-                      {language === 'bn'
-                        ? 'Download admin_deleted_records.sql'
-                        : 'Download admin_deleted_records.sql'}
-                    </span>
-                  </button>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setShowSqlVaultModal(true)}
+                      className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer text-xs"
+                    >
+                      <ArchiveRestore className="w-3.5 h-3.5" />
+                      <span>
+                        {language === 'bn'
+                          ? 'SQL দেখুন ও ব্যাক আনুন (Browse & Restore)'
+                          : 'Browse & Restore from SQL'}
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => downloadAdminDeletedSqlFile()}
+                      className="px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-lg font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer text-xs"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      <span>Download admin_deleted_records.sql</span>
+                    </button>
+                  </div>
                 </div>
               )}
             </div>
@@ -4507,6 +4535,11 @@ npm start
           </div>
         </div>
       )}
+      <AdminDeletedSqlVaultModal
+        isOpen={showSqlVaultModal}
+        onClose={() => setShowSqlVaultModal(false)}
+        initialFilter="ALL"
+      />
     </div>
   );
 };

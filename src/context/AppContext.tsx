@@ -224,14 +224,43 @@ export const dedupeTransactionDayBookEntries = (
           continue;
         }
         seenSaleRef.add(matchedSale.id);
+        const netSalePaid = Math.max(0, Number(matchedSale.paidAmount || 0));
+        const resolvedWalletId =
+          netSalePaid > 0
+            ? matchedSale.walletId && matchedSale.walletId !== 'due' && matchedSale.walletId !== 'credit'
+              ? matchedSale.walletId
+              : entry.walletId && entry.walletId !== 'due' && entry.walletId !== 'credit'
+                ? entry.walletId
+                : 'w-cash'
+            : 'due';
+        const resolvedWalletName =
+          netSalePaid > 0
+            ? (matchedSale.walletName && matchedSale.walletName !== 'Credit / বাকি'
+                ? matchedSale.walletName
+                : entry.walletName && entry.walletName !== 'Credit / বাকি'
+                  ? entry.walletName
+                  : 'Cash')
+            : 'Credit / বাকি';
         cleaned.push({
           ...entry,
           referenceId: matchedSale.id,
           voucherNo: matchedSale.invoiceNumber,
           referenceNo: matchedSale.invoiceNumber,
+          amount: netSalePaid,
+          walletId: resolvedWalletId,
+          walletName: resolvedWalletName,
         });
         continue;
       }
+    } else if (entry.type === 'SALE_RETURN') {
+      const refInvNo = entry.referenceNo || '';
+      cleaned.push({
+        ...entry,
+        amount: 0,
+        walletId: 'adjusted',
+        walletName: refInvNo ? `Adjusted in #${refInvNo}` : 'Adjusted in Invoice',
+      });
+      continue;
     } else if (entry.type === 'PURCHASE') {
       const vNo = (entry.voucherNo || '').trim().toLowerCase();
       const rNo = (entry.referenceNo || '').trim().toLowerCase();
@@ -656,6 +685,15 @@ interface AppContextType {
   triggerSyncNow: () => Promise<boolean>;
   saveApiEndpoint: (url: string, autoSync?: boolean, intervalSeconds?: number) => Promise<boolean>;
   downloadAdminDeletedSqlFile: () => Promise<void>;
+  fetchAdminDeletedArchive: () => Promise<AdminDeletedRecord[]>;
+  restoreFromAdminDeletedArchive: (
+    record: AdminDeletedRecord,
+    options?: { removeFromArchive?: boolean; silent?: boolean }
+  ) => Promise<boolean>;
+  restoreMultipleFromAdminDeletedArchive: (
+    records: AdminDeletedRecord[],
+    options?: { removeFromArchive?: boolean }
+  ) => Promise<number>;
 }
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
@@ -744,6 +782,100 @@ const sanitizeWallets = (list: Wallet[]): Wallet[] =>
     ...w,
     balance: clampNonNegative(w?.balance, 2),
   }));
+
+const NON_CASH_WALLET_IDS = new Set(['due', 'credit', 'adjusted', 'emi']);
+
+const resolveWalletIndex = (list: Wallet[], preferredId?: string, preferredName?: string): number => {
+  if (!Array.isArray(list) || list.length === 0) return -1;
+  const cleanId = preferredId ? String(preferredId).trim() : '';
+  if (cleanId && !NON_CASH_WALLET_IDS.has(cleanId.toLowerCase())) {
+    const byId = list.findIndex(w => w.id === cleanId);
+    if (byId >= 0) return byId;
+  }
+  const cleanName = preferredName ? String(preferredName).trim().toLowerCase() : '';
+  if (cleanName) {
+    const byName = list.findIndex(
+      w => w.name?.trim().toLowerCase() === cleanName || w.nameBn?.trim().toLowerCase() === cleanName
+    );
+    if (byName >= 0) return byName;
+  }
+  const cashIdx = list.findIndex(w => w.type === 'CASH');
+  return cashIdx >= 0 ? cashIdx : 0;
+};
+
+const deductAmountFromWallets = (
+  list: Wallet[],
+  amount: number,
+  preferredId?: string,
+  preferredName?: string
+): Wallet[] => {
+  const targetAmt = Number(amount || 0);
+  if (!Number.isFinite(targetAmt) || targetAmt <= 0 || !Array.isArray(list) || list.length === 0) return list;
+  const next = list.map(w => ({ ...w }));
+  let remaining = Number(targetAmt.toFixed(2));
+  const primaryIdx = resolveWalletIndex(next, preferredId, preferredName);
+  if (primaryIdx >= 0 && remaining > 0) {
+    const avail = Number(next[primaryIdx].balance || 0);
+    const take = Math.min(avail, remaining);
+    next[primaryIdx].balance = Math.max(0, Number((avail - take).toFixed(2)));
+    remaining = Number((remaining - take).toFixed(2));
+  }
+  if (remaining > 0.005) {
+    const fallbackOrder = next
+      .map((w, idx) => ({ w, idx }))
+      .filter(x => x.idx !== primaryIdx && Number(x.w.balance || 0) > 0)
+      .sort((a, b) => (a.w.type === 'CASH' ? -1 : b.w.type === 'CASH' ? 1 : 0));
+    for (const item of fallbackOrder) {
+      if (remaining <= 0.005) break;
+      const avail = Number(next[item.idx].balance || 0);
+      const take = Math.min(avail, remaining);
+      next[item.idx].balance = Math.max(0, Number((avail - take).toFixed(2)));
+      remaining = Number((remaining - take).toFixed(2));
+    }
+  }
+  return next;
+};
+
+const creditAmountToWallets = (
+  list: Wallet[],
+  amount: number,
+  preferredId?: string,
+  preferredName?: string
+): Wallet[] => {
+  const targetAmt = Number(amount || 0);
+  if (!Number.isFinite(targetAmt) || targetAmt <= 0 || !Array.isArray(list) || list.length === 0) return list;
+  const idx = resolveWalletIndex(list, preferredId, preferredName);
+  if (idx < 0) return list;
+  return list.map((w, i) =>
+    i === idx ? { ...w, balance: Number((Number(w.balance || 0) + targetAmt).toFixed(2)) } : w
+  );
+};
+
+const hasOnlyZeroCashInSources = (state: {
+  deletedEntityIds?: Record<string, string[]>;
+  deletedSaleInvoices?: DeletedSaleInvoice[];
+  saleInvoices?: SaleInvoice[];
+  cashAdjustments?: CashAdjustment[];
+  installmentSchemes?: InstallmentScheme[];
+  purchaseReturns?: PurchaseReturn[];
+  dayBookEntries?: DayBookEntry[];
+}): boolean => {
+  const hasDeletedSale =
+    (state.deletedEntityIds?.saleInvoices?.length || 0) > 0 || (state.deletedSaleInvoices?.length || 0) > 0;
+  if (!hasDeletedSale) return false;
+  const hasPaidSale = (state.saleInvoices || []).some(inv => Number(inv.paidAmount || 0) > 0);
+  const hasCashAdd = (state.cashAdjustments || []).some(a => a.type === 'CASH_ADD' && Number(a.amount || 0) > 0);
+  const hasEmiCash = (state.installmentSchemes || []).some(
+    s =>
+      Number(s.downPayment || 0) > 0 ||
+      (s.schedules || []).some(sc => sc.status === 'PAID' && Number(sc.paidAmount || 0) > 0)
+  );
+  const hasCashPurchaseReturn = (state.purchaseReturns || []).some(r => Number(r.cashRefunded || 0) > 0);
+  const hasDayBookCashIn = (state.dayBookEntries || []).some(
+    d => d.flow === 'IN' && d.type !== 'WALLET_TRANSFER' && Number(d.amount || 0) > 0
+  );
+  return !hasPaidSale && !hasCashAdd && !hasEmiCash && !hasCashPurchaseReturn && !hasDayBookCashIn;
+};
 
 const sanitizeProducts = (list: Product[]): Product[] =>
   (Array.isArray(list) ? list : []).map(p => ({
@@ -2516,6 +2648,30 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     theme,
   ]);
 
+  // Reconcile stale Cash In Hand balance if invoices/returns were deleted leaving zero cash-in ledger sources
+  const hasReconciledOrphanCashRef = useRef<boolean>(false);
+  useEffect(() => {
+    if (hasReconciledOrphanCashRef.current) return;
+    hasReconciledOrphanCashRef.current = true;
+    const hasPositiveBalance = wallets.some(w => Number(w.balance || 0) > 0);
+    if (
+      hasPositiveBalance &&
+      hasOnlyZeroCashInSources({
+        deletedEntityIds: deletedEntityIdsRef.current,
+        deletedSaleInvoices,
+        saleInvoices,
+        cashAdjustments,
+        installmentSchemes,
+        purchaseReturns,
+        dayBookEntries,
+      })
+    ) {
+      lastPushTimeRef.current = Date.now();
+      hasUnsyncedChangesRef.current = true;
+      setWallets(prev => prev.map(w => ({ ...w, balance: 0 })));
+    }
+  }, []);
+
   // Apply dark mode class to HTML root
   useEffect(() => {
     const root = document.documentElement;
@@ -2644,7 +2800,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         if (Array.isArray(data.products) && data.products.length > 0) setProducts(data.products);
         if (Array.isArray(data.categories)) setCategories(data.categories);
         if (Array.isArray(data.parties)) setParties(data.parties);
-        if (Array.isArray(data.wallets)) setWallets(data.wallets);
+        if (Array.isArray(data.wallets)) {
+          const shouldZeroLocalWallets = hasOnlyZeroCashInSources({
+            deletedEntityIds: data.deletedEntityIds || deletedEntityIdsRef.current,
+            deletedSaleInvoices: Array.isArray(data.deletedSaleInvoices) ? data.deletedSaleInvoices : [],
+            saleInvoices: Array.isArray(data.saleInvoices) ? data.saleInvoices : [],
+            cashAdjustments: Array.isArray(data.cashAdjustments) ? data.cashAdjustments : [],
+            installmentSchemes: Array.isArray(data.installmentSchemes) ? data.installmentSchemes : [],
+            purchaseReturns: Array.isArray(data.purchaseReturns) ? data.purchaseReturns : [],
+            dayBookEntries: Array.isArray(data.dayBookEntries) ? data.dayBookEntries : [],
+          });
+          setWallets(shouldZeroLocalWallets ? (data.wallets as Wallet[]).map(w => ({ ...w, balance: 0 })) : data.wallets);
+        }
         if (Array.isArray(data.saleInvoices)) setSaleInvoices(data.saleInvoices);
         if (Array.isArray(data.deletedSaleInvoices)) setDeletedSaleInvoices(data.deletedSaleInvoices);
         if (Array.isArray(data.saleReturns)) setSaleReturns(data.saleReturns);
@@ -2661,7 +2828,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         if (Array.isArray(data.payrollHistory)) setPayrollHistory(data.payrollHistory);
         if (Array.isArray(data.expenseCategories)) setExpenseCategories(data.expenseCategories);
         if (Array.isArray(data.expenseVouchers)) setExpenseVouchers(data.expenseVouchers);
-        if (Array.isArray(data.dayBookEntries)) setDayBookEntries(data.dayBookEntries);
+        if (Array.isArray(data.dayBookEntries)) {
+          const parsedSales = Array.isArray(data.saleInvoices) ? data.saleInvoices : [];
+          const parsedPurchases = Array.isArray(data.purchaseInvoices) ? data.purchaseInvoices : [];
+          setDayBookEntries(dedupeTransactionDayBookEntries(data.dayBookEntries, parsedSales, parsedPurchases).cleaned);
+        }
         if (Array.isArray(data.cashAdjustments)) setCashAdjustments(data.cashAdjustments);
         if (Array.isArray(data.activityLogs)) setActivityLogs(data.activityLogs);
         if (Array.isArray(data.users)) setUsers(data.users);
@@ -2815,6 +2986,116 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     })();
   };
 
+  const getAdminRequestHeaders = (): Record<string, string> => ({
+    'x-admin-id': currentUser?.id || '',
+    'x-admin-username': currentUser?.username || '',
+    'x-admin-role': currentUser?.role || '',
+  });
+
+  const fetchAdminDeletedArchive = async (): Promise<AdminDeletedRecord[]> => {
+    if (!isAdminUser()) return [];
+
+    let localRecords: AdminDeletedRecord[] = [];
+    try {
+      const raw = localStorage.getItem('DOKANPRO_ADMIN_DELETED_SQL_ARCHIVE');
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) localRecords = parsed;
+      }
+    } catch {}
+
+    const activeUrl = getActiveApiEndpoint();
+    const candidateUrls = [
+      '/api/admin-deleted-archive',
+      ...(activeUrl
+        ? [activeUrl.includes('?') ? `${activeUrl}&action=get_admin_deleted_archive` : `${activeUrl}?action=get_admin_deleted_archive`]
+        : []),
+    ];
+
+    for (const url of candidateUrls) {
+      try {
+        const res = await fetch(url, {
+          method: 'GET',
+          headers: {
+            'Cache-Control': 'no-cache',
+            ...getAdminRequestHeaders(),
+          },
+        });
+        if (!res.ok) continue;
+        const json = await res.json();
+        if (json && json.success && Array.isArray(json.records)) {
+          const byId = new Map<string, AdminDeletedRecord>();
+          localRecords.forEach(r => {
+            if (r?.archiveId) byId.set(String(r.archiveId), r);
+          });
+          json.records.forEach((r: AdminDeletedRecord) => {
+            if (r?.archiveId) byId.set(String(r.archiveId), r);
+          });
+          // Prefer server's authoritative list if server returned records or local was empty
+          const resolved = json.records.length > 0 ? json.records : Array.from(byId.values());
+          try {
+            localStorage.setItem('DOKANPRO_ADMIN_DELETED_SQL_ARCHIVE', JSON.stringify(resolved));
+          } catch {}
+          return [...resolved].sort((a, b) =>
+            String(b.deletedAtIso || '').localeCompare(String(a.deletedAtIso || ''))
+          );
+        }
+      } catch {}
+    }
+
+    return [...localRecords].sort((a, b) =>
+      String(b.deletedAtIso || '').localeCompare(String(a.deletedAtIso || ''))
+    );
+  };
+
+  const removeAdminDeletedArchiveRecords = async (archiveIds: string[]): Promise<void> => {
+    if (!isAdminUser() || !Array.isArray(archiveIds) || archiveIds.length === 0) return;
+    const removeSet = new Set(archiveIds.map(String));
+
+    try {
+      const raw = localStorage.getItem('DOKANPRO_ADMIN_DELETED_SQL_ARCHIVE');
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          const remaining = parsed.filter(
+            (r: AdminDeletedRecord) => r?.archiveId && !removeSet.has(String(r.archiveId))
+          );
+          localStorage.setItem('DOKANPRO_ADMIN_DELETED_SQL_ARCHIVE', JSON.stringify(remaining));
+        }
+      }
+    } catch {}
+
+    const payload = JSON.stringify({ archiveIds });
+    const postRemove = async (url: string): Promise<boolean> => {
+      try {
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...getAdminRequestHeaders(),
+          },
+          body: payload,
+        });
+        if (!res.ok) return false;
+        const json = await res.json();
+        return Boolean(json && json.success);
+      } catch {
+        return false;
+      }
+    };
+
+    const okPrimary = await postRemove('/api/admin-deleted-archive/remove');
+    if (!okPrimary) {
+      const activeUrl = getActiveApiEndpoint();
+      if (activeUrl) {
+        const phpUrl = activeUrl.includes('?')
+          ? `${activeUrl}&action=remove_admin_deleted_archive`
+          : `${activeUrl}?action=remove_admin_deleted_archive`;
+        await postRemove(phpUrl);
+      }
+    }
+  };
+
   const downloadAdminDeletedSqlFile = async (): Promise<void> => {
     if (!isAdminUser()) {
       showToast(
@@ -2838,7 +3119,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       try {
         const res = await fetch(url, {
           method: 'GET',
-          headers: { 'Cache-Control': 'no-cache' },
+          headers: {
+            'Cache-Control': 'no-cache',
+            ...getAdminRequestHeaders(),
+          },
         });
         if (!res.ok) continue;
         const text = await res.text();
@@ -3159,7 +3443,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           setPayrollHistory(Array.isArray(data.payrollHistory) ? data.payrollHistory : []);
           setExpenseCategories(Array.isArray(data.expenseCategories) ? data.expenseCategories : initialExpenseCategories);
           setExpenseVouchers(Array.isArray(data.expenseVouchers) ? data.expenseVouchers : []);
-          setDayBookEntries(Array.isArray(data.dayBookEntries) ? data.dayBookEntries : []);
+          setDayBookEntries(
+            Array.isArray(data.dayBookEntries)
+              ? dedupeTransactionDayBookEntries(
+                  data.dayBookEntries,
+                  Array.isArray(data.saleInvoices) ? data.saleInvoices : [],
+                  Array.isArray(data.purchaseInvoices) ? data.purchaseInvoices : []
+                ).cleaned
+              : []
+          );
           setCashAdjustments(Array.isArray(data.cashAdjustments) ? data.cashAdjustments : []);
           setActivityLogs(Array.isArray(data.activityLogs) ? data.activityLogs : []);
           setUsers(Array.isArray(data.users) && data.users.length > 0 ? data.users : initialUsers);
@@ -3195,7 +3487,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             setParties(prev => filterByTombstone(shouldMerge ? mergeEntitiesById(prev, data.parties) : data.parties, 'parties'));
           }
           if (Array.isArray(data.wallets) && data.wallets.length > 0) {
-            setWallets(prev => filterByTombstone(shouldMerge ? mergeEntitiesById(prev, data.wallets) : data.wallets, 'wallets'));
+            const shouldZeroPulledWallets = hasOnlyZeroCashInSources({
+              deletedEntityIds: mergedDeletedEntityMap,
+              deletedSaleInvoices: Array.isArray(data.deletedSaleInvoices) ? data.deletedSaleInvoices : deletedSaleInvoices,
+              saleInvoices: Array.isArray(data.saleInvoices) ? data.saleInvoices : saleInvoices,
+              cashAdjustments: Array.isArray(data.cashAdjustments) ? data.cashAdjustments : cashAdjustments,
+              installmentSchemes: Array.isArray(data.installmentSchemes) ? data.installmentSchemes : installmentSchemes,
+              purchaseReturns: Array.isArray(data.purchaseReturns) ? data.purchaseReturns : purchaseReturns,
+              dayBookEntries: Array.isArray(data.dayBookEntries) ? data.dayBookEntries : dayBookEntries,
+            });
+            setWallets(prev => {
+              const mergedW = filterByTombstone(shouldMerge ? mergeEntitiesById(prev, data.wallets) : data.wallets, 'wallets');
+              return shouldZeroPulledWallets ? mergedW.map(w => ({ ...w, balance: 0 })) : mergedW;
+            });
           }
           const mergedSalesList: SaleInvoice[] = Array.isArray(data.saleInvoices)
             ? dedupeById(
@@ -5534,6 +5838,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return false;
     }
 
+    lastPushTimeRef.current = Date.now();
+    hasUnsyncedChangesRef.current = true;
+
     const nowStr = formatDeletionTimestamp();
     const adminDeleting = isAdminUser();
     const finalReason =
@@ -5542,63 +5849,138 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         ? (language === 'bn' ? 'অ্যাডমিন কর্তৃক চালান মুছে ফেলা হয়েছে' : 'Invoice deleted by Admin')
         : (language === 'bn' ? 'ইউজার কর্তৃক চালান মুছে ফেলা হয়েছে' : 'Invoice deleted by user'));
 
-    // 1. For non-Admin users ONLY, save to in-app deletedSaleInvoices archive
-    if (!adminDeleting) {
-      const deletedRecord: DeletedSaleInvoice = {
-        id: `del-inv-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-        originalInvoiceId: inv.id,
-        invoiceNumber: inv.invoiceNumber,
-        date: inv.date,
-        customerId: inv.customerId,
-        customerName: inv.customerName,
-        customerPhone: inv.customerPhone,
-        customerAddress: inv.customerAddress,
-        items: inv.items || [],
-        subtotal: inv.subtotal,
-        discount: inv.discount,
-        vatAmount: inv.vatAmount,
-        grandTotal: inv.grandTotal,
-        paidAmount: inv.paidAmount,
-        dueAmount: inv.dueAmount,
-        paymentMethod: inv.paymentMethod,
-        walletId: inv.walletId,
-        walletName: inv.walletName,
-        cashierName: inv.cashierName,
-        createdBy: inv.createdBy,
-        deletedAt: nowStr,
-        deletedBy: {
-          id: currentUser?.id || 'usr-1',
-          username: currentUser?.username || 'staff',
-          fullName: currentUser?.fullName || 'Staff',
-          role: currentUser?.role || 'SALESMAN',
-        },
-        deletionReason: finalReason,
-        invoiceSnapshot: JSON.parse(JSON.stringify(inv)),
-      };
+    // Collect any Sale Returns & Installment Schemes linked to this invoice so nothing is orphaned
+    const linkedSaleReturns = saleReturns.filter(
+      r => r.invoiceId === inv.id || r.originalInvoiceNumber === inv.invoiceNumber
+    );
+    const linkedReturnIds = new Set(linkedSaleReturns.map(r => r.id));
+    const linkedReturnVoucherNos = new Set(linkedSaleReturns.map(r => r.returnNumber));
 
-      setDeletedSaleInvoices(prev => {
-        const updated = [deletedRecord, ...prev];
-        try {
-          localStorage.setItem('DOKANPRO_DELETED_INVOICES_ARCHIVE', JSON.stringify(updated));
-        } catch (e) {
-          console.warn('Failed to save to standalone deleted invoice archive', e);
-        }
-        return updated;
-      });
-    }
+    const linkedSchemes: InstallmentScheme[] =
+      inv.installmentPlanId || inv.isInstallmentSale
+        ? installmentSchemes.filter(
+            s => s.invoiceId === inv.id || s.invoiceNumber === inv.invoiceNumber || s.id === inv.installmentPlanId
+          )
+        : [];
+    const linkedSchemeIds = new Set<string>(linkedSchemes.map(s => s.id));
+    const linkedSchemeNums = new Set<string>(linkedSchemes.map(s => s.schemeNumber));
+    const linkedEmiReceiptNos = new Set(
+      linkedSchemes.flatMap(s => (s.schedules || []).map(sc => sc.receiptVoucherNo).filter(Boolean) as string[])
+    );
 
-    // 2. Revert product stocks (add sold quantities back into stock in base units)
+    // 1. Always save to in-app deletedSaleInvoices (Delete List) for BOTH Admin and Staff
+    const deletedRecord: DeletedSaleInvoice = {
+      id: `del-inv-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+      originalInvoiceId: inv.id,
+      invoiceNumber: inv.invoiceNumber,
+      date: inv.date,
+      customerId: inv.customerId,
+      customerName: inv.customerName,
+      customerPhone: inv.customerPhone,
+      customerAddress: inv.customerAddress,
+      items: inv.items || [],
+      subtotal: inv.subtotal,
+      discount: inv.discount,
+      vatAmount: inv.vatAmount,
+      grandTotal: inv.grandTotal,
+      paidAmount: inv.paidAmount,
+      dueAmount: inv.dueAmount,
+      paymentMethod: inv.paymentMethod,
+      walletId: inv.walletId,
+      walletName: inv.walletName,
+      cashierName: inv.cashierName,
+      createdBy: inv.createdBy,
+      deletedAt: nowStr,
+      deletedBy: {
+        id: currentUser?.id || 'usr-1',
+        username: currentUser?.username || (adminDeleting ? 'admin' : 'staff'),
+        fullName: currentUser?.fullName || (adminDeleting ? 'Super Admin' : 'Staff'),
+        role: currentUser?.role || (adminDeleting ? 'ADMIN' : 'SALESMAN'),
+      },
+      deletionReason: finalReason,
+      invoiceSnapshot: JSON.parse(JSON.stringify(inv)),
+      ...(linkedSaleReturns.length > 0 ? { linkedSaleReturns: JSON.parse(JSON.stringify(linkedSaleReturns)) } : {}),
+      ...(linkedSchemes.length > 0 ? { linkedInstallmentSchemes: JSON.parse(JSON.stringify(linkedSchemes)) } : {}),
+    };
+
+    setDeletedSaleInvoices(prev => {
+      const updated = [deletedRecord, ...prev];
+      try {
+        localStorage.setItem('DOKANPRO_DELETED_INVOICES_ARCHIVE', JSON.stringify(updated));
+      } catch (e) {
+        console.warn('Failed to save to standalone deleted invoice archive', e);
+      }
+      return updated;
+    });
+
+    // 2. Revert product stocks & batches (add ONLY net un-returned quantities back into stock)
     setProducts(prevProds =>
       prevProds.map(prod => {
         const soldItems = inv.items.filter(i => i.productId === prod.id);
-        if (soldItems.length > 0) {
-          const totalSoldBaseQty = soldItems.reduce((sum, i) => sum + getBaseQuantity(i, prod), 0);
-          return {
-            ...prod,
-            stock: Number((prod.stock + totalSoldBaseQty).toFixed(4)),
-          };
+        if (soldItems.length === 0) return prod;
+
+        const totalSoldBaseQty = soldItems.reduce((sum, i) => sum + getBaseQuantity(i, prod), 0);
+        const alreadyReturnedBaseQty = linkedSaleReturns.reduce((retSum, r) => {
+          const matchingRetItems = (r.items || []).filter(ri => ri.productId === prod.id);
+          return (
+            retSum +
+            matchingRetItems.reduce(
+              (s, ri) =>
+                s +
+                getBaseQuantity(
+                  {
+                    quantity: ri.returnQuantity,
+                    unit: ri.unit,
+                    conversionFactor: ri.conversionFactor,
+                    baseQuantity: ri.baseQuantity,
+                  },
+                  prod
+                ),
+              0
+            )
+          );
+        }, 0);
+
+        const netQtyToRestore = Math.max(0, Number((totalSoldBaseQty - alreadyReturnedBaseQty).toFixed(4)));
+        if (netQtyToRestore <= 0) return prod;
+
+        const updatedBatches = prod.batches ? prod.batches.map(b => ({ ...b })) : undefined;
+        if (updatedBatches && updatedBatches.length > 0) {
+          let remToRestore = netQtyToRestore;
+          for (const soldItem of soldItems) {
+            if (remToRestore <= 1e-6) break;
+            const itemBase = getBaseQuantity(soldItem, prod);
+            const restoreAmt = Math.min(itemBase, remToRestore);
+            let targetIdx = -1;
+            if (soldItem.batchId) {
+              targetIdx = updatedBatches.findIndex(b => b.id === soldItem.batchId);
+            }
+            if (targetIdx < 0 && soldItem.batchNumber) {
+              targetIdx = updatedBatches.findIndex(
+                b => b.batchNumber.trim().toLowerCase() === soldItem.batchNumber!.trim().toLowerCase()
+              );
+            }
+            if (targetIdx < 0) targetIdx = updatedBatches.findIndex(b => !isExpiredDate(b.expDate));
+            if (targetIdx < 0) targetIdx = 0;
+            if (targetIdx >= 0 && restoreAmt > 0) {
+              updatedBatches[targetIdx].stock = Number((Number(updatedBatches[targetIdx].stock || 0) + restoreAmt).toFixed(4));
+              remToRestore = Number((remToRestore - restoreAmt).toFixed(4));
+            }
+          }
+          if (remToRestore > 1e-6) {
+            updatedBatches[0].stock = Number((Number(updatedBatches[0].stock || 0) + remToRestore).toFixed(4));
+          }
         }
-        return prod;
+
+        const activeBatchesWithExp = (updatedBatches || []).filter(b => Number(b.stock) > 0 && b.expDate);
+        activeBatchesWithExp.sort((a, b) => a.expDate.localeCompare(b.expDate));
+        const earliestActiveExp = activeBatchesWithExp[0]?.expDate || prod.expDate || '';
+
+        return {
+          ...prod,
+          stock: Number((prod.stock + netQtyToRestore).toFixed(4)),
+          ...(updatedBatches ? { batches: updatedBatches, expDate: earliestActiveExp } : {}),
+        };
       })
     );
 
@@ -5609,7 +5991,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           if (p.id === inv.customerId) {
             return {
               ...p,
-              currentBalance: Math.max(0, p.currentBalance - inv.dueAmount),
+              currentBalance: Math.max(0, Number((p.currentBalance - inv.dueAmount).toFixed(2))),
             };
           }
           return p;
@@ -5617,90 +5999,102 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       );
     }
 
-    // 4. Revert wallet balance ONLY if actual cash/bank/MFS was received (never for pure DUE/Credit sales)
-    if (
-      inv.paidAmount > 0 &&
-      inv.paymentMethod !== 'DUE' &&
-      inv.walletId &&
-      inv.walletId !== 'due' &&
-      inv.walletId !== 'credit'
-    ) {
-      setWallets(prevWallets =>
-        prevWallets.map(w => {
-          if (w.id === inv.walletId) {
-            return {
-              ...w,
-              balance: Math.max(0, Number((w.balance - inv.paidAmount).toFixed(2))),
-            };
-          }
-          return w;
-        })
-      );
-    }
-
-    // 5. Remove linked DayBook entry if created for this invoice
+    // 4. Identify linked DayBook entries BEFORE filtering them out
     const isLinkedSaleDb = (d: DayBookEntry) =>
       (d.type === 'SALE' && (d.referenceId === inv.id || d.id === `db-sale-${inv.id}`)) ||
       d.voucherNo === inv.invoiceNumber ||
-      d.referenceNo === inv.invoiceNumber;
-    const removedDayBookIds = dayBookEntries.filter(isLinkedSaleDb).map(d => d.id);
+      d.referenceNo === inv.invoiceNumber ||
+      (d.type === 'SALE_RETURN' &&
+        (linkedReturnVoucherNos.has(d.voucherNo) || d.referenceId === inv.id || d.referenceNo === inv.invoiceNumber)) ||
+      (d.type === 'EMI_COLLECTION' &&
+        (linkedSchemeNums.has(d.voucherNo) ||
+          (d.referenceNo ? linkedSchemeNums.has(d.referenceNo) : false) ||
+          linkedEmiReceiptNos.has(d.voucherNo)));
+
+    const linkedDbEntries = dayBookEntries.filter(isLinkedSaleDb);
+    const linkedSaleDbEntries = linkedDbEntries.filter(d => d.type === 'SALE' && d.flow === 'IN');
+    const linkedSaleDbCashMax = linkedSaleDbEntries.reduce((mx, d) => Math.max(mx, Number(d.amount || 0)), 0);
+    const paidToRevert = Math.max(Number(inv.paidAmount || 0), linkedSaleDbCashMax);
+
+    const linkedSaleDbWalletEntry = linkedSaleDbEntries.find(
+      d => d.walletId && !NON_CASH_WALLET_IDS.has(String(d.walletId).toLowerCase())
+    );
+    const saleWalletHint =
+      inv.walletId && !NON_CASH_WALLET_IDS.has(String(inv.walletId).toLowerCase())
+        ? inv.walletId
+        : linkedSaleDbWalletEntry?.walletId;
+    const saleWalletNameHint =
+      inv.walletName && inv.walletName !== 'Credit / বাকি'
+        ? inv.walletName
+        : linkedSaleDbWalletEntry?.walletName;
+
+    // Also compute collected EMI payments tied to this invoice's installment schemes
+    const emiCollectionsToRevert: Array<{ amount: number; walletId?: string; walletName?: string }> = [];
+    if (linkedSchemes.length > 0) {
+      const countedReceiptNos = new Set<string>();
+      for (const dbEmi of linkedDbEntries.filter(d => d.type === 'EMI_COLLECTION' && d.flow === 'IN')) {
+        const amt = Number(dbEmi.amount || 0);
+        // Avoid double-counting downpayment if inv.paidAmount already reverted it
+        const isDownPaymentDuplicate =
+          paidToRevert > 0 &&
+          linkedSchemeNums.has(dbEmi.voucherNo) &&
+          linkedSchemes.some(s => s.schemeNumber === dbEmi.voucherNo && Math.abs(Number(s.downPayment || 0) - amt) < 0.01);
+        if (amt > 0 && !isDownPaymentDuplicate) {
+          emiCollectionsToRevert.push({ amount: amt, walletId: dbEmi.walletId, walletName: dbEmi.walletName });
+          countedReceiptNos.add(dbEmi.voucherNo);
+        }
+      }
+      for (const sc of linkedSchemes) {
+        for (const sched of sc.schedules || []) {
+          if (sched.status === 'PAID') {
+            const schedTotal = Number(sched.paidAmount || sched.amount || 0) + Number(sched.penalty || 0);
+            if (schedTotal > 0 && (!sched.receiptVoucherNo || !countedReceiptNos.has(sched.receiptVoucherNo))) {
+              emiCollectionsToRevert.push({ amount: schedTotal, walletId: sched.walletId });
+            }
+          }
+        }
+      }
+    }
+
+    // 5. Revert ALL Cash In Hand / Wallet balances received from this invoice (cash/partial/EMI)
+    if (paidToRevert > 0 || emiCollectionsToRevert.length > 0) {
+      setWallets(prevWallets => {
+        let next = prevWallets;
+        if (paidToRevert > 0) {
+          next = deductAmountFromWallets(next, paidToRevert, saleWalletHint, saleWalletNameHint);
+        }
+        for (const col of emiCollectionsToRevert) {
+          next = deductAmountFromWallets(next, col.amount, col.walletId, col.walletName);
+        }
+        return next;
+      });
+    }
+
+    // 6. Remove & tombstone ALL linked DayBook entries, Sale Returns & Installment Schemes
+    const removedDayBookIds = linkedDbEntries.map(d => d.id);
     setDayBookEntries(prev => prev.filter(d => !isLinkedSaleDb(d)));
     if (removedDayBookIds.length > 0) {
       recordDeletedTombstones('dayBookEntries', removedDayBookIds);
     }
 
-    // 6. If it was an Installment / EMI sale, cancel/remove linked scheme if any
-    if (inv.installmentPlanId || inv.isInstallmentSale) {
-      const removedSchemeIds = installmentSchemes
-        .filter(
-          s =>
-            s.invoiceId === inv.id ||
-            s.invoiceNumber === inv.invoiceNumber ||
-            s.id === inv.installmentPlanId
-        )
-        .map(s => s.id);
-      setInstallmentSchemes(prev =>
-        prev.filter(
-          s =>
-            s.invoiceId !== inv.id &&
-            s.invoiceNumber !== inv.invoiceNumber &&
-            s.id !== inv.installmentPlanId
-        )
-      );
-      if (removedSchemeIds.length > 0) {
-        recordDeletedTombstones('installmentSchemes', removedSchemeIds);
-      }
+    if (linkedSaleReturns.length > 0) {
+      setSaleReturns(prev => prev.filter(r => !linkedReturnIds.has(r.id) && !linkedReturnVoucherNos.has(r.returnNumber)));
+      recordDeletedTombstones('saleReturns', [
+        ...linkedSaleReturns.map(r => r.id),
+        ...linkedSaleReturns.map(r => r.returnNumber),
+      ]);
+    }
+
+    if (linkedSchemes.length > 0) {
+      setInstallmentSchemes(prev => prev.filter(s => !linkedSchemeIds.has(s.id)));
+      recordDeletedTombstones('installmentSchemes', Array.from(linkedSchemeIds));
     }
 
     // 7. Remove invoice from active sales state & tombstone so it never resurrects on sync/reload
     setSaleInvoices(prev => prev.filter(i => i.id !== invoiceId));
     recordDeletedTombstones('saleInvoices', [inv.id, inv.invoiceNumber]);
 
-    if (adminDeleting) {
-      // Admin deletion: invisible in software (no Deleted Invoice tab entry, no Activity Log), saved to separate SQL file
-      archiveAdminDeletion([
-        {
-          entityType: 'SALE_INVOICE',
-          sourceTable: 'sale_invoices',
-          recordId: inv.id,
-          referenceNo: inv.invoiceNumber,
-          title: `Sale Invoice #${inv.invoiceNumber} - ${inv.customerName}`,
-          amount: inv.grandTotal,
-          reason: finalReason,
-          snapshot: inv,
-        },
-      ]);
-
-      showToast(
-        language === 'bn'
-          ? `অ্যাডমিন ডিলিট সম্পন্ন: চালান #${inv.invoiceNumber} সফটওয়্যার থেকে সম্পূর্ণ মুছে আলাদা SQL ফাইলে (admin_deleted_records.sql) সেভ করা হয়েছে।`
-          : `Admin Delete: Invoice #${inv.invoiceNumber} removed from software and saved to separate SQL file (admin_deleted_records.sql).`,
-        'success'
-      );
-      return true;
-    }
-
-    // 8. Log Activity for non-Admin deletions
+    // 8. Log Activity (Delete List now holds both Admin and Staff deletions; SQL file archiving happens when deleted from Delete List)
     logActivity({
       actionType: 'DELETE',
       title: `Deleted Sale Invoice #${inv.invoiceNumber}`,
@@ -5712,10 +6106,193 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     showToast(
       language === 'bn'
-        ? `চালান #${inv.invoiceNumber} সফলভাবে ডিলিট হয়েছে এবং 'ডিলিট ইনভয়েস' ফাইলে সংরক্ষিত হয়েছে!`
-        : `Invoice #${inv.invoiceNumber} deleted and saved to Deleted Invoices file!`,
+        ? `চালান #${inv.invoiceNumber} সফলভাবে ডিলিট লিস্টে (Delete Invoice Archive) রাখা হয়েছে! সেখান থেকে ডিলিট করলে আলাদা SQL ফাইলে জমা থাকবে।`
+        : `Invoice #${inv.invoiceNumber} moved to Deleted Invoices list! Deleting from there saves it to separate SQL archive.`,
       'success'
     );
+
+    return true;
+  };
+
+  const applyRestoredSaleInvoice = (
+    restoredInv: SaleInvoice,
+    linkedReturns: SaleReturn[] = [],
+    linkedSchemes: InstallmentScheme[] = []
+  ): boolean => {
+    lastPushTimeRef.current = Date.now();
+    hasUnsyncedChangesRef.current = true;
+
+    // 1. Deduct net un-returned sold stock & batches (in base units)
+    setProducts(prevProds =>
+      prevProds.map(prod => {
+        const soldItems = (restoredInv.items || []).filter(i => i.productId === prod.id);
+        if (soldItems.length === 0) return prod;
+        const totalSoldBaseQty = soldItems.reduce((sum, i) => sum + getBaseQuantity(i, prod), 0);
+        const alreadyReturnedBaseQty = linkedReturns.reduce((retSum, r) => {
+          const matchingRetItems = (r.items || []).filter(ri => ri.productId === prod.id);
+          return (
+            retSum +
+            matchingRetItems.reduce(
+              (s, ri) =>
+                s +
+                getBaseQuantity(
+                  {
+                    quantity: ri.returnQuantity,
+                    unit: ri.unit,
+                    conversionFactor: ri.conversionFactor,
+                    baseQuantity: ri.baseQuantity,
+                  },
+                  prod
+                ),
+              0
+            )
+          );
+        }, 0);
+        const netSoldToDeduct = Math.max(0, Number((totalSoldBaseQty - alreadyReturnedBaseQty).toFixed(4)));
+        if (netSoldToDeduct <= 0) return prod;
+
+        const updatedBatches = prod.batches ? prod.batches.map(b => ({ ...b })) : undefined;
+        if (updatedBatches && updatedBatches.length > 0) {
+          let remToDeduct = netSoldToDeduct;
+          for (const soldItem of soldItems) {
+            if (remToDeduct <= 1e-6) break;
+            let itemRem = Math.min(getBaseQuantity(soldItem, prod), remToDeduct);
+            if (soldItem.batchId) {
+              const bIdx = updatedBatches.findIndex(b => b.id === soldItem.batchId);
+              if (bIdx >= 0 && updatedBatches[bIdx].stock > 0) {
+                const take = Math.min(updatedBatches[bIdx].stock, itemRem);
+                updatedBatches[bIdx].stock = Math.max(0, Number((updatedBatches[bIdx].stock - take).toFixed(4)));
+                itemRem = Number((itemRem - take).toFixed(4));
+                remToDeduct = Number((remToDeduct - take).toFixed(4));
+              }
+            }
+            for (let i = 0; i < updatedBatches.length && itemRem > 1e-6; i++) {
+              const avail = Number(updatedBatches[i].stock || 0);
+              if (avail > 0) {
+                const take = Math.min(avail, itemRem);
+                updatedBatches[i].stock = Math.max(0, Number((avail - take).toFixed(4)));
+                itemRem = Number((itemRem - take).toFixed(4));
+                remToDeduct = Number((remToDeduct - take).toFixed(4));
+              }
+            }
+          }
+        }
+        return {
+          ...prod,
+          stock: Math.max(0, Number((prod.stock - netSoldToDeduct).toFixed(4))),
+          ...(updatedBatches ? { batches: updatedBatches } : {}),
+        };
+      })
+    );
+
+    // 2. Re-apply customer due if any
+    if (
+      restoredInv.customerId &&
+      restoredInv.customerId !== 'walk-in' &&
+      restoredInv.dueAmount > 0 &&
+      restoredInv.paymentMethod !== 'INSTALLMENT' &&
+      !restoredInv.isInstallmentSale
+    ) {
+      setParties(prevParties =>
+        prevParties.map(p => {
+          if (p.id === restoredInv.customerId) {
+            return {
+              ...p,
+              currentBalance: Number((p.currentBalance + restoredInv.dueAmount).toFixed(2)),
+            };
+          }
+          return p;
+        })
+      );
+    }
+
+    // 3. Re-apply wallet balance (net paid + any collected installment schedules)
+    setWallets(prevWallets => {
+      let next = prevWallets;
+      if (Number(restoredInv.paidAmount || 0) > 0 && restoredInv.paymentMethod !== 'DUE') {
+        next = creditAmountToWallets(next, restoredInv.paidAmount, restoredInv.walletId, restoredInv.walletName);
+      }
+      for (const sc of linkedSchemes) {
+        for (const sched of sc.schedules || []) {
+          if (sched.status === 'PAID') {
+            const schedTotal = Number(sched.paidAmount || sched.amount || 0) + Number(sched.penalty || 0);
+            if (schedTotal > 0) {
+              next = creditAmountToWallets(next, schedTotal, sched.walletId);
+            }
+          }
+        }
+      }
+      return next;
+    });
+
+    // 4. Put back into active saleInvoices, linked returns/schemes & clear tombstones + restore SALE DayBook entry
+    removeDeletedTombstones('saleInvoices', [restoredInv.id, restoredInv.invoiceNumber]);
+    removeDeletedTombstones('dayBookEntries', [`db-sale-${restoredInv.id}`]);
+    setSaleInvoices(prev => [restoredInv, ...prev.filter(i => i.id !== restoredInv.id)]);
+
+    if (linkedReturns.length > 0) {
+      removeDeletedTombstones(
+        'saleReturns',
+        linkedReturns.flatMap(r => [r.id, r.returnNumber])
+      );
+      setSaleReturns(prev => {
+        const existingIds = new Set(prev.map(r => r.id));
+        const toAdd = linkedReturns.filter(r => !existingIds.has(r.id));
+        return [...toAdd, ...prev];
+      });
+    }
+
+    if (linkedSchemes.length > 0) {
+      removeDeletedTombstones('installmentSchemes', linkedSchemes.map(s => s.id));
+      setInstallmentSchemes(prev => {
+        const existingIds = new Set(prev.map(s => s.id));
+        const toAdd = linkedSchemes.filter(s => !existingIds.has(s.id));
+        return [...toAdd, ...prev];
+      });
+    }
+
+    setDayBookEntries(prev => {
+      const exists = prev.some(
+        d =>
+          d.type === 'SALE' &&
+          (d.referenceId === restoredInv.id ||
+            d.id === `db-sale-${restoredInv.id}` ||
+            d.voucherNo === restoredInv.invoiceNumber)
+      );
+      if (exists) return prev;
+      const resolvedWalletId =
+        restoredInv.paidAmount > 0 && restoredInv.walletId && !NON_CASH_WALLET_IDS.has(restoredInv.walletId)
+          ? restoredInv.walletId
+          : restoredInv.paidAmount > 0
+            ? 'w-cash'
+            : 'due';
+      const resolvedWalletName =
+        restoredInv.paidAmount > 0
+          ? (wallets.find(w => w.id === resolvedWalletId)?.name || restoredInv.walletName || 'Cash')
+          : 'Credit / বাকি';
+      const restoredDbEntry: DayBookEntry = {
+        id: `db-sale-${restoredInv.id}`,
+        voucherNo: restoredInv.invoiceNumber,
+        date: restoredInv.date,
+        type: 'SALE',
+        flow: 'IN',
+        partyId: restoredInv.customerId,
+        partyName: restoredInv.customerName,
+        partyType: 'CUSTOMER',
+        amount: restoredInv.paidAmount || 0,
+        walletId: resolvedWalletId,
+        walletName: resolvedWalletName,
+        referenceId: restoredInv.id,
+        referenceNo: restoredInv.invoiceNumber,
+        remarks:
+          restoredInv.paidAmount > 0
+            ? `POS Sale receipt from ${restoredInv.customerName} (Total: ৳${restoredInv.grandTotal.toLocaleString()}, Received: ৳${restoredInv.paidAmount.toLocaleString()}${restoredInv.dueAmount > 0 ? `, Due: ৳${restoredInv.dueAmount.toLocaleString()}` : ''})`
+            : `Credit Sale / বাকি বিক্রয় to ${restoredInv.customerName} (Total: ৳${restoredInv.grandTotal.toLocaleString()}, Due: ৳${restoredInv.dueAmount.toLocaleString()})`,
+        createdBy: currentUser?.id || 'usr-1',
+        createdAt: restoredInv.createdAt || `${restoredInv.date} 12:00:00`,
+      };
+      return [restoredDbEntry, ...prev];
+    });
 
     return true;
   };
@@ -5728,57 +6305,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     const restoredInv: SaleInvoice = record.invoiceSnapshot;
-
-    // 1. Deduct stock for restored items (in base units)
-    setProducts(prevProds =>
-      prevProds.map(prod => {
-        const soldItems = restoredInv.items.filter(i => i.productId === prod.id);
-        if (soldItems.length > 0) {
-          const totalSoldBaseQty = soldItems.reduce((sum, i) => sum + getBaseQuantity(i, prod), 0);
-          return {
-            ...prod,
-            stock: Math.max(0, Number((prod.stock - totalSoldBaseQty).toFixed(4))),
-          };
-        }
-        return prod;
-      })
+    applyRestoredSaleInvoice(
+      restoredInv,
+      record.linkedSaleReturns || [],
+      record.linkedInstallmentSchemes || []
     );
 
-    // 2. Re-apply customer due if any
-    if (restoredInv.customerId && restoredInv.customerId !== 'walk-in' && restoredInv.dueAmount > 0) {
-      setParties(prevParties =>
-        prevParties.map(p => {
-          if (p.id === restoredInv.customerId) {
-            return {
-              ...p,
-              currentBalance: p.currentBalance + restoredInv.dueAmount,
-            };
-          }
-          return p;
-        })
-      );
-    }
-
-    // 3. Re-apply wallet balance
-    if (restoredInv.paidAmount > 0 && restoredInv.walletId) {
-      setWallets(prevWallets =>
-        prevWallets.map(w => {
-          if (w.id === restoredInv.walletId) {
-            return {
-              ...w,
-              balance: w.balance + restoredInv.paidAmount,
-            };
-          }
-          return w;
-        })
-      );
-    }
-
-    // 4. Put back into active saleInvoices & clear tombstone
-    removeDeletedTombstones('saleInvoices', [restoredInv.id, restoredInv.invoiceNumber]);
-    setSaleInvoices(prev => [restoredInv, ...prev.filter(i => i.id !== restoredInv.id)]);
-
-    // 5. Remove from deletedSaleInvoices
+    // Remove from deletedSaleInvoices
     recordDeletedTombstones('deletedSaleInvoices', [record.id]);
     setDeletedSaleInvoices(prev => {
       const updated = prev.filter(d => d.id !== record.id);
@@ -5788,7 +6321,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return updated;
     });
 
-    // 6. Log Activity
+    // Log Activity
     logActivity({
       actionType: 'USER_ACTION',
       title: `Restored Sale Invoice #${restoredInv.invoiceNumber}`,
@@ -6290,6 +6823,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     // 4. Auto-update Original Sale Invoice amounts, due & status
+    let updatedInvGrandTotal = origInv ? origInv.grandTotal : 0;
+    let updatedInvSubtotal = origInv ? origInv.subtotal : 0;
+    let updatedInvDueAmount = origInv ? origInv.dueAmount : 0;
+    let updatedInvPaidAmount = origInv ? origInv.paidAmount : 0;
+    let updatedInvStatus: InvoiceStatus = origInv?.status || 'PAID';
+
     if (origInv) {
       const updatedAllReturns = [...existingReturnsForInvoice, newReturn];
       const totalReturnedQtyByProduct = new Map<string, number>();
@@ -6317,32 +6856,32 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         }
       });
 
+      updatedInvGrandTotal = Math.max(0, Number((origInv.grandTotal - invoiceGrandTotalDelta).toFixed(2)));
+      updatedInvSubtotal = Math.max(0, Number((origInv.subtotal - invoiceSubtotalDelta).toFixed(2)));
+      updatedInvDueAmount = Math.max(0, Number((origInv.dueAmount - invoiceDueDelta).toFixed(2)));
+      updatedInvPaidAmount = Math.max(0, Number((origInv.paidAmount - invoicePaidDelta).toFixed(2)));
+      const newReturnedAmount = Number(((origInv.returnedAmount || 0) + returnAmount).toFixed(2));
+      const isFull = allItemsReturned || updatedInvGrandTotal <= 0;
+      updatedInvStatus =
+        updatedInvGrandTotal <= 0 || updatedInvDueAmount <= 0
+          ? 'PAID'
+          : updatedInvPaidAmount > 0
+            ? 'PARTIAL'
+            : 'DUE';
+
       setSaleInvoices(prevInvoices =>
         prevInvoices.map(inv => {
           if (inv.id !== origInv.id) return inv;
-          const newGrandTotal = Math.max(0, Number((inv.grandTotal - invoiceGrandTotalDelta).toFixed(2)));
-          const newSubtotal = Math.max(0, Number((inv.subtotal - invoiceSubtotalDelta).toFixed(2)));
-          const newDueAmount = Math.max(0, Number((inv.dueAmount - invoiceDueDelta).toFixed(2)));
-          const newPaidAmount = Math.max(0, Number((inv.paidAmount - invoicePaidDelta).toFixed(2)));
-          const newReturnedAmount = Number(((inv.returnedAmount || 0) + returnAmount).toFixed(2));
-          const isFull = allItemsReturned || newGrandTotal <= 0;
-          const newStatus: InvoiceStatus =
-            newGrandTotal <= 0 || newDueAmount <= 0
-              ? 'PAID'
-              : newPaidAmount > 0
-                ? 'PARTIAL'
-                : 'DUE';
-
           return {
             ...inv,
             originalGrandTotal: inv.originalGrandTotal ?? inv.grandTotal,
-            subtotal: newSubtotal,
-            grandTotal: newGrandTotal,
-            paidAmount: newPaidAmount,
-            dueAmount: newDueAmount,
+            subtotal: updatedInvSubtotal,
+            grandTotal: updatedInvGrandTotal,
+            paidAmount: updatedInvPaidAmount,
+            dueAmount: updatedInvDueAmount,
             returnedAmount: newReturnedAmount,
             returnStatus: isFull ? 'FULL' : 'PARTIAL',
-            status: newStatus,
+            status: updatedInvStatus,
           };
         })
       );
@@ -6363,7 +6902,27 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       );
     }
 
-    // 6. Log in Day Book (amount reflects actual liquid cash out; 0 if settled entirely via Receivable)
+    lastPushTimeRef.current = Date.now();
+    hasUnsyncedChangesRef.current = true;
+
+    // 6. Update original Invoice #'s SALE DayBook entry in-place to post-return Cash In total,
+    //    and log SALE_RETURN with amount 0 so Cash Out is NEVER increased on product returns.
+    const resolvedSaleWalletId =
+      updatedInvPaidAmount > 0 && origInv?.walletId && origInv.walletId !== 'due' && origInv.walletId !== 'credit'
+        ? origInv.walletId
+        : updatedInvPaidAmount > 0
+          ? 'w-cash'
+          : 'due';
+    const resolvedSaleWalletName =
+      updatedInvPaidAmount > 0
+        ? (wallets.find(w => w.id === resolvedSaleWalletId)?.name || origInv?.walletName || 'Cash')
+        : 'Credit / বাকি';
+    const updatedSaleRemarks = origInv
+      ? updatedInvPaidAmount > 0
+        ? `POS Sale receipt from ${origInv.customerName} (Net Total: ৳${updatedInvGrandTotal.toLocaleString()}, Cash In: ৳${updatedInvPaidAmount.toLocaleString()}${updatedInvDueAmount > 0 ? `, Due: ৳${updatedInvDueAmount.toLocaleString()}` : ''}, After Return #${returnNum}: -৳${returnAmount.toLocaleString()})`
+        : `Sale to ${origInv.customerName} (After Return #${returnNum}: Net Total ৳${updatedInvGrandTotal.toLocaleString()}, Cash In: ৳0${updatedInvDueAmount > 0 ? `, Due: ৳${updatedInvDueAmount.toLocaleString()}` : ''})`
+      : '';
+
     const dbEntry: DayBookEntry = {
       id: `db-${Date.now()}`,
       voucherNo: returnNum,
@@ -6373,18 +6932,84 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       partyId: returnData.customerId,
       partyName: returnData.customerName,
       partyType: 'CUSTOMER',
-      amount: cashRefunded,
-      walletId: cashRefunded > 0 ? returnData.refundWalletId : 'credit',
+      amount: 0,
+      walletId: 'adjusted',
       walletName:
-        cashRefunded > 0
-          ? (refundWallet?.name || 'Cash')
-          : 'Receivable Adjusted / বকেয়া সমন্বয়',
+        language === 'bn'
+          ? `ইনভয়েস #${returnData.originalInvoiceNumber} সমন্বয়`
+          : `Adjusted in #${returnData.originalInvoiceNumber}`,
+      referenceId: origInv?.id,
       referenceNo: returnData.originalInvoiceNumber,
-      remarks: `Sale return for #${returnData.originalInvoiceNumber} (Total: ৳${returnAmount.toLocaleString()}${dueAdjusted > 0 ? `, Receivable Reduced: ৳${dueAdjusted.toLocaleString()}` : ''}${cashRefunded > 0 ? `, Cash Refund: ৳${cashRefunded.toLocaleString()}` : ''}) - ${returnData.reason}`,
+      remarks: `Sale return for #${returnData.originalInvoiceNumber} (Return: ৳${returnAmount.toLocaleString()}, Invoice Cash In Updated: ৳${updatedInvPaidAmount.toLocaleString()}${dueAdjusted > 0 ? `, Receivable Reduced: ৳${dueAdjusted.toLocaleString()}` : ''}) - ${returnData.reason}`,
       createdBy: currentUser?.id || 'usr-1',
       createdAt: fullTimeStamp,
     };
-    setDayBookEntries(prev => [dbEntry, ...prev]);
+
+    const isLinkedOrigSaleDb = (d: DayBookEntry) =>
+      !!origInv &&
+      d.type === 'SALE' &&
+      (d.referenceId === origInv.id ||
+        d.id === `db-sale-${origInv.id}` ||
+        d.voucherNo === origInv.invoiceNumber ||
+        d.referenceNo === origInv.invoiceNumber);
+
+    const extraOrigSaleDbIds = origInv ? dayBookEntries.filter(isLinkedOrigSaleDb).slice(1).map(d => d.id) : [];
+    if (extraOrigSaleDbIds.length > 0) {
+      recordDeletedTombstones('dayBookEntries', extraOrigSaleDbIds);
+    }
+
+    setDayBookEntries(prev => {
+      let nextEntries = prev;
+      if (origInv) {
+        const firstIdx = prev.findIndex(isLinkedOrigSaleDb);
+        if (firstIdx >= 0) {
+          const primaryId = prev[firstIdx].id;
+          nextEntries = prev
+            .filter(d => !isLinkedOrigSaleDb(d) || d.id === primaryId)
+            .map(d =>
+              d.id === primaryId
+                ? {
+                    ...d,
+                    referenceId: origInv.id,
+                    voucherNo: origInv.invoiceNumber,
+                    referenceNo: origInv.invoiceNumber,
+                    amount: updatedInvPaidAmount,
+                    walletId:
+                      updatedInvPaidAmount > 0 && d.walletId && d.walletId !== 'due' && d.walletId !== 'credit'
+                        ? d.walletId
+                        : resolvedSaleWalletId,
+                    walletName:
+                      updatedInvPaidAmount > 0 && d.walletName && d.walletName !== 'Credit / বাকি'
+                        ? d.walletName
+                        : resolvedSaleWalletName,
+                    remarks: updatedSaleRemarks,
+                  }
+                : d
+            );
+        } else {
+          const synthSaleEntry: DayBookEntry = {
+            id: `db-sale-${origInv.id}`,
+            voucherNo: origInv.invoiceNumber,
+            date: origInv.date,
+            type: 'SALE',
+            flow: 'IN',
+            partyId: origInv.customerId,
+            partyName: origInv.customerName,
+            partyType: 'CUSTOMER',
+            amount: updatedInvPaidAmount,
+            walletId: resolvedSaleWalletId,
+            walletName: resolvedSaleWalletName,
+            referenceId: origInv.id,
+            referenceNo: origInv.invoiceNumber,
+            remarks: updatedSaleRemarks,
+            createdBy: origInv.cashierName || currentUser?.id || 'usr-1',
+            createdAt: origInv.createdAt || fullTimeStamp,
+          };
+          nextEntries = [synthSaleEntry, ...prev];
+        }
+      }
+      return [dbEntry, ...nextEntries];
+    });
 
     logActivity({
       actionType: 'USER_ACTION',
@@ -6474,9 +7099,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       })
     );
 
-    // 2. Revert Customer Balance (Total Receivable restored)
+    const targetOrigInv = saleInvoices.find(
+      inv => inv.id === targetReturn.invoiceId || inv.invoiceNumber === targetReturn.originalInvoiceNumber
+    );
+    const hasActiveOrigInv = Boolean(targetOrigInv);
+
+    // 2. Revert Customer Balance (ONLY if original invoice is still active; otherwise invoice deletion already cleared due)
     const partyDueToRestore = Number(targetReturn.partyDueReduced || 0);
-    if (partyDueToRestore > 0 && targetReturn.customerId && targetReturn.customerId !== 'walk-in') {
+    if (hasActiveOrigInv && partyDueToRestore > 0 && targetReturn.customerId && targetReturn.customerId !== 'walk-in') {
       setParties(prevParties =>
         prevParties.map(p => {
           if (p.id === targetReturn.customerId) {
@@ -6490,15 +7120,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       );
     }
 
-    // 3. Revert Linked EMI Scheme (if applicable)
+    // 3. Revert Linked EMI Scheme (if applicable and original invoice still exists)
     const emiDueToRestore = Number(targetReturn.emiDueReduced || 0);
-    if (emiDueToRestore > 0) {
-      const origInv = saleInvoices.find(i => i.id === targetReturn.invoiceId);
+    if (hasActiveOrigInv && emiDueToRestore > 0 && targetOrigInv) {
       setInstallmentSchemes(prevSchemes =>
         prevSchemes.map(s => {
           if (
-            (origInv?.installmentPlanId && s.id === origInv.installmentPlanId) ||
-            s.invoiceId === targetReturn.invoiceId
+            (targetOrigInv.installmentPlanId && s.id === targetOrigInv.installmentPlanId) ||
+            s.invoiceId === targetOrigInv.id
           ) {
             const newRemaining = Number((s.remainingBalance + emiDueToRestore).toFixed(2));
             return {
@@ -6518,14 +7147,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const subDelta = Number(targetReturn.invoiceSubtotalDelta ?? 0);
     const paidDelta = Number(targetReturn.invoicePaidDelta ?? 0);
     const dueDelta = Number(targetReturn.invoiceDueDelta ?? 0);
-    if (grandDelta > 0 || subDelta > 0 || paidDelta > 0 || dueDelta > 0) {
+    let restoredInvPaid = targetOrigInv ? targetOrigInv.paidAmount : 0;
+    let restoredInvGrand = targetOrigInv ? targetOrigInv.grandTotal : 0;
+    let restoredInvDue = targetOrigInv ? targetOrigInv.dueAmount : 0;
+
+    if (hasActiveOrigInv && targetOrigInv && (grandDelta > 0 || subDelta > 0 || paidDelta > 0 || dueDelta > 0)) {
       const remainingReturnsCount = saleReturns.filter(
-        r => r.invoiceId === targetReturn.invoiceId && r.id !== targetReturn.id
+        r => (r.invoiceId === targetOrigInv.id || r.originalInvoiceNumber === targetOrigInv.invoiceNumber) && r.id !== targetReturn.id
       ).length;
+
+      restoredInvGrand = Number((targetOrigInv.grandTotal + grandDelta).toFixed(2));
+      restoredInvPaid = Number((targetOrigInv.paidAmount + paidDelta).toFixed(2));
+      restoredInvDue = Number((targetOrigInv.dueAmount + dueDelta).toFixed(2));
 
       setSaleInvoices(prevInvoices =>
         prevInvoices.map(inv => {
-          if (inv.id !== targetReturn.invoiceId) return inv;
+          if (inv.id !== targetOrigInv.id) return inv;
           const restoredGrand = Number((inv.grandTotal + grandDelta).toFixed(2));
           const restoredSub = Number((inv.subtotal + subDelta).toFixed(2));
           const restoredPaid = Number((inv.paidAmount + paidDelta).toFixed(2));
@@ -6548,30 +7185,71 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       );
     }
 
-    // 5. Revert wallet balance for actual cash refund only & remove DayBook entry
+    // 5. Revert wallet balance ONLY if original invoice still exists (if invoice was deleted, NEVER resurrect its cash into Cash In Hand!)
     const cashToRevert =
       targetReturn.cashRefunded !== undefined ? Number(targetReturn.cashRefunded) : Number(targetReturn.totalRefund || 0);
-    if (cashToRevert > 0 && targetReturn.refundWalletId && targetReturn.refundWalletId !== 'credit') {
+    if (
+      hasActiveOrigInv &&
+      cashToRevert > 0 &&
+      targetReturn.refundWalletId &&
+      !NON_CASH_WALLET_IDS.has(String(targetReturn.refundWalletId).toLowerCase())
+    ) {
       setWallets(prevWallets =>
-        prevWallets.map(w => {
-          if (w.id === targetReturn.refundWalletId) {
-            return {
-              ...w,
-              balance: Number((w.balance + cashToRevert).toFixed(2)),
-            };
-          }
-          return w;
-        })
+        creditAmountToWallets(prevWallets, cashToRevert, targetReturn.refundWalletId, targetReturn.refundWalletName)
       );
     }
+
+    lastPushTimeRef.current = Date.now();
+    hasUnsyncedChangesRef.current = true;
 
     const removedDayBookIds = dayBookEntries
       .filter(db => db.voucherNo === targetReturn.returnNumber)
       .map(db => db.id);
     if (removedDayBookIds.length > 0) {
-      setDayBookEntries(prev => prev.filter(db => db.voucherNo !== targetReturn.returnNumber));
       recordDeletedTombstones('dayBookEntries', removedDayBookIds);
     }
+
+    setDayBookEntries(prev => {
+      const withoutReturn = prev.filter(db => db.voucherNo !== targetReturn.returnNumber);
+      if (!targetOrigInv) return withoutReturn;
+
+      const restoredWalletId =
+        restoredInvPaid > 0
+          ? targetOrigInv.walletId && targetOrigInv.walletId !== 'due' && targetOrigInv.walletId !== 'credit'
+            ? targetOrigInv.walletId
+            : 'w-cash'
+          : 'due';
+      const restoredWalletName =
+        restoredInvPaid > 0
+          ? (wallets.find(w => w.id === restoredWalletId)?.name || targetOrigInv.walletName || 'Cash')
+          : 'Credit / বাকি';
+      const restoredRemarks =
+        restoredInvPaid > 0
+          ? `POS Sale receipt from ${targetOrigInv.customerName} (Total: ৳${restoredInvGrand.toLocaleString()}, Received: ৳${restoredInvPaid.toLocaleString()}${restoredInvDue > 0 ? `, Due: ৳${restoredInvDue.toLocaleString()}` : ''})`
+          : `Credit Sale / বাকি বিক্রয় to ${targetOrigInv.customerName} (Total: ৳${restoredInvGrand.toLocaleString()}, Due: ৳${restoredInvDue.toLocaleString()})`;
+
+      return withoutReturn.map(db =>
+        db.type === 'SALE' &&
+        (db.referenceId === targetOrigInv.id ||
+          db.id === `db-sale-${targetOrigInv.id}` ||
+          db.voucherNo === targetOrigInv.invoiceNumber ||
+          db.referenceNo === targetOrigInv.invoiceNumber)
+          ? {
+              ...db,
+              amount: restoredInvPaid,
+              walletId:
+                restoredInvPaid > 0 && db.walletId && db.walletId !== 'due' && db.walletId !== 'credit'
+                  ? db.walletId
+                  : restoredWalletId,
+              walletName:
+                restoredInvPaid > 0 && db.walletName && db.walletName !== 'Credit / বাকি'
+                  ? db.walletName
+                  : restoredWalletName,
+              remarks: restoredRemarks,
+            }
+          : db
+      );
+    });
 
     setSaleReturns(prev => prev.filter(r => r.id !== targetReturn.id && r.returnNumber !== targetReturn.returnNumber));
     recordDeletedTombstones('saleReturns', [targetReturn.id, targetReturn.returnNumber]);
@@ -7500,6 +8178,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return false;
     }
 
+    lastPushTimeRef.current = Date.now();
+    hasUnsyncedChangesRef.current = true;
+
     const nowStr = formatDeletionTimestamp();
     const adminDeleting = isAdminUser();
     const finalReason =
@@ -7508,60 +8189,86 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         ? (language === 'bn' ? 'অ্যাডমিন কর্তৃক ক্রয় চালান মুছে ফেলা হয়েছে' : 'Purchase bill deleted by Admin')
         : (language === 'bn' ? 'ইউজার কর্তৃক ক্রয় চালান মুছে ফেলা হয়েছে' : 'Purchase bill deleted by user'));
 
-    // 1. For non-Admin users ONLY, save to in-app deletedPurchaseInvoices archive
-    if (!adminDeleting) {
-      const deletedRecord: DeletedPurchaseInvoice = {
-        id: `del-pur-${Date.now()}`,
-        originalPurchaseId: inv.id,
-        billNumber: inv.billNumber,
-        supplierInvoiceNo: inv.supplierInvoiceNo,
-        date: inv.date,
-        supplierId: inv.supplierId,
-        supplierName: inv.supplierName,
-        supplierPhone: inv.supplierPhone,
-        items: inv.items || [],
-        subtotal: inv.subtotal,
-        discount: inv.discount,
-        taxAmount: inv.taxAmount,
-        grandTotal: inv.grandTotal,
-        paidAmount: inv.paidAmount,
-        dueAmount: inv.dueAmount,
-        paymentMethod: inv.paymentMethod,
-        walletId: inv.walletId,
-        walletName: inv.walletName,
-        createdBy: inv.createdBy,
-        deletedAt: nowStr,
-        deletedBy: {
-          id: currentUser?.id || 'usr-1',
-          username: currentUser?.username || 'staff',
-          fullName: currentUser?.fullName || 'Staff',
-          role: currentUser?.role || 'MANAGER',
-        },
-        deletionReason: finalReason,
-        invoiceSnapshot: JSON.parse(JSON.stringify(inv)),
-      };
+    const linkedPurchaseReturns = purchaseReturns.filter(
+      r => r.purchaseId === inv.id || r.originalBillNumber === inv.billNumber
+    );
+    const linkedPurReturnIds = new Set(linkedPurchaseReturns.map(r => r.id));
+    const linkedPurReturnVoucherNos = new Set(linkedPurchaseReturns.map(r => r.returnNumber));
 
-      setDeletedPurchaseInvoices(prev => {
-        const updated = [deletedRecord, ...prev];
-        try {
-          localStorage.setItem('DOKANPRO_DELETED_PURCHASES_ARCHIVE', JSON.stringify(updated));
-        } catch (e) {
-          console.warn('Failed to save to standalone deleted purchase archive', e);
-        }
-        return updated;
-      });
-    }
+    // 1. Always save to in-app deletedPurchaseInvoices (Delete List) for BOTH Admin and Staff
+    const deletedRecord: DeletedPurchaseInvoice = {
+      id: `del-pur-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+      originalPurchaseId: inv.id,
+      billNumber: inv.billNumber,
+      supplierInvoiceNo: inv.supplierInvoiceNo,
+      date: inv.date,
+      supplierId: inv.supplierId,
+      supplierName: inv.supplierName,
+      supplierPhone: inv.supplierPhone,
+      items: inv.items || [],
+      subtotal: inv.subtotal,
+      discount: inv.discount,
+      taxAmount: inv.taxAmount,
+      grandTotal: inv.grandTotal,
+      paidAmount: inv.paidAmount,
+      dueAmount: inv.dueAmount,
+      paymentMethod: inv.paymentMethod,
+      walletId: inv.walletId,
+      walletName: inv.walletName,
+      createdBy: inv.createdBy,
+      deletedAt: nowStr,
+      deletedBy: {
+        id: currentUser?.id || 'usr-1',
+        username: currentUser?.username || (adminDeleting ? 'admin' : 'staff'),
+        fullName: currentUser?.fullName || (adminDeleting ? 'Super Admin' : 'Staff'),
+        role: currentUser?.role || (adminDeleting ? 'ADMIN' : 'MANAGER'),
+      },
+      deletionReason: finalReason,
+      invoiceSnapshot: JSON.parse(JSON.stringify(inv)),
+      ...(linkedPurchaseReturns.length > 0 ? { linkedPurchaseReturns: JSON.parse(JSON.stringify(linkedPurchaseReturns)) } : {}),
+    };
 
-    // 2. Revert product stocks and batch entries (in base units)
+    setDeletedPurchaseInvoices(prev => {
+      const updated = [deletedRecord, ...prev];
+      try {
+        localStorage.setItem('DOKANPRO_DELETED_PURCHASES_ARCHIVE', JSON.stringify(updated));
+      } catch (e) {
+        console.warn('Failed to save to standalone deleted purchase archive', e);
+      }
+      return updated;
+    });
+
+    // 2. Revert product stocks and batch entries (deduct net un-returned bought quantities in base units)
     setProducts(prevProds =>
       prevProds.map(prod => {
         const boughtItems = inv.items.filter(i => i.productId === prod.id);
         if (boughtItems.length > 0) {
           const totalBoughtBaseQty = boughtItems.reduce((sum, i) => sum + getBaseQuantity(i, prod), 0);
+          const alreadyReturnedBaseQty = linkedPurchaseReturns.reduce((retSum, r) => {
+            const matchingRetItems = (r.items || []).filter(ri => ri.productId === prod.id);
+            return (
+              retSum +
+              matchingRetItems.reduce(
+                (s, ri) =>
+                  s +
+                  getBaseQuantity(
+                    {
+                      quantity: ri.returnQuantity,
+                      unit: ri.unit,
+                      conversionFactor: ri.conversionFactor,
+                      baseQuantity: ri.baseQuantity,
+                    },
+                    prod
+                  ),
+                0
+              )
+            );
+          }, 0);
+          const netQtyToDeduct = Math.max(0, Number((totalBoughtBaseQty - alreadyReturnedBaseQty).toFixed(4)));
+
           let updatedBatches = prod.batches ? [...prod.batches.map(b => ({ ...b }))] : [];
-          if (updatedBatches.length > 0) {
-            // Revert batch created by this invoice billNumber or deduct qty
-            let remainingToDeduct = totalBoughtBaseQty;
+          if (updatedBatches.length > 0 && netQtyToDeduct > 0) {
+            let remainingToDeduct = netQtyToDeduct;
             updatedBatches = updatedBatches
               .map(b => {
                 if (b.purchaseInvoiceNo === inv.billNumber && remainingToDeduct > 0) {
@@ -7577,7 +8284,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               .filter(b => b.stock > 0 || b.purchaseInvoiceNo !== inv.billNumber);
           }
 
-          const newStock = Math.max(0, Number((prod.stock - totalBoughtBaseQty).toFixed(4)));
+          const newStock = Math.max(0, Number((prod.stock - netQtyToDeduct).toFixed(4)));
           const activeBatchesWithExp = updatedBatches.filter(b => Number(b.stock) > 0 && b.expDate);
           activeBatchesWithExp.sort((a, b) => a.expDate.localeCompare(b.expDate));
           const earliestActiveExp = activeBatchesWithExp[0]?.expDate || prod.expDate || '';
@@ -7600,7 +8307,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           if (p.id === inv.supplierId) {
             return {
               ...p,
-              currentBalance: Math.max(0, p.currentBalance - inv.dueAmount),
+              currentBalance: Math.max(0, Number((p.currentBalance - inv.dueAmount).toFixed(2))),
             };
           }
           return p;
@@ -7608,68 +8315,59 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       );
     }
 
-    // 4. Revert wallet balance ONLY if actual cash/bank/MFS was paid (never for pure DUE/Credit purchases)
-    if (
-      inv.paidAmount > 0 &&
-      inv.paymentMethod !== 'DUE' &&
-      inv.walletId &&
-      inv.walletId !== 'credit' &&
-      inv.walletId !== 'due'
-    ) {
-      setWallets(prevWallets =>
-        prevWallets.map(w => {
-          if (w.id === inv.walletId) {
-            return {
-              ...w,
-              balance: Number((w.balance + inv.paidAmount).toFixed(2)),
-            };
-          }
-          return w;
-        })
-      );
-    }
-
-    // 5. Remove linked DayBook entry if created for this invoice
+    // 4. Identify linked DayBook entries & revert wallet balance cleanly
     const isLinkedPurchaseDb = (d: DayBookEntry) =>
       (d.type === 'PURCHASE' && (d.referenceId === inv.id || d.id === `db-pur-${inv.id}`)) ||
       d.voucherNo === inv.billNumber ||
       d.referenceNo === inv.billNumber ||
-      (inv.supplierInvoiceNo && (d.voucherNo === inv.supplierInvoiceNo || d.referenceNo === inv.supplierInvoiceNo));
-    const removedDayBookIds = dayBookEntries.filter(isLinkedPurchaseDb).map(d => d.id);
+      (inv.supplierInvoiceNo && (d.voucherNo === inv.supplierInvoiceNo || d.referenceNo === inv.supplierInvoiceNo)) ||
+      (d.type === 'PURCHASE_RETURN' &&
+        (linkedPurReturnVoucherNos.has(d.voucherNo) || d.referenceNo === inv.billNumber));
+
+    const linkedPurDbEntries = dayBookEntries.filter(isLinkedPurchaseDb);
+    const linkedPurDbPaidMax = linkedPurDbEntries
+      .filter(d => d.type === 'PURCHASE' && d.flow === 'OUT')
+      .reduce((mx, d) => Math.max(mx, Number(d.amount || 0)), 0);
+    const paidToRevert = Math.max(Number(inv.paidAmount || 0), linkedPurDbPaidMax);
+
+    const linkedPurDbWalletEntry = linkedPurDbEntries.find(
+      d => d.type === 'PURCHASE' && d.walletId && !NON_CASH_WALLET_IDS.has(String(d.walletId).toLowerCase())
+    );
+    const purWalletHint =
+      inv.walletId && !NON_CASH_WALLET_IDS.has(String(inv.walletId).toLowerCase())
+        ? inv.walletId
+        : linkedPurDbWalletEntry?.walletId;
+    const purWalletNameHint =
+      inv.walletName && inv.walletName !== 'Credit / বাকি'
+        ? inv.walletName
+        : linkedPurDbWalletEntry?.walletName;
+
+    if (paidToRevert > 0) {
+      setWallets(prevWallets => creditAmountToWallets(prevWallets, paidToRevert, purWalletHint, purWalletNameHint));
+    }
+
+    // 5. Remove & tombstone linked DayBook entries and Purchase Returns
+    const removedDayBookIds = linkedPurDbEntries.map(d => d.id);
     setDayBookEntries(prev => prev.filter(d => !isLinkedPurchaseDb(d)));
     if (removedDayBookIds.length > 0) {
       recordDeletedTombstones('dayBookEntries', removedDayBookIds);
+    }
+
+    if (linkedPurchaseReturns.length > 0) {
+      setPurchaseReturns(prev =>
+        prev.filter(r => !linkedPurReturnIds.has(r.id) && !linkedPurReturnVoucherNos.has(r.returnNumber))
+      );
+      recordDeletedTombstones('purchaseReturns', [
+        ...linkedPurchaseReturns.map(r => r.id),
+        ...linkedPurchaseReturns.map(r => r.returnNumber),
+      ]);
     }
 
     // 6. Remove invoice from active purchaseInvoices state & tombstone so it never resurrects on sync/reload
     setPurchaseInvoices(prev => prev.filter(i => i.id !== invoiceId));
     recordDeletedTombstones('purchaseInvoices', [inv.id, inv.billNumber]);
 
-    if (adminDeleting) {
-      // Admin deletion: invisible in software (no Delete Purchase tab entry, no Activity Log), saved to separate SQL file
-      archiveAdminDeletion([
-        {
-          entityType: 'PURCHASE_INVOICE',
-          sourceTable: 'purchase_invoices',
-          recordId: inv.id,
-          referenceNo: inv.billNumber,
-          title: `Purchase Bill #${inv.billNumber} - ${inv.supplierName}`,
-          amount: inv.grandTotal,
-          reason: finalReason,
-          snapshot: inv,
-        },
-      ]);
-
-      showToast(
-        language === 'bn'
-          ? `অ্যাডমিন ডিলিট সম্পন্ন: ক্রয় চালান #${inv.billNumber} সফটওয়্যার থেকে সম্পূর্ণ মুছে আলাদা SQL ফাইলে (admin_deleted_records.sql) সেভ করা হয়েছে।`
-          : `Admin Delete: Purchase bill #${inv.billNumber} removed from software and saved to separate SQL file (admin_deleted_records.sql).`,
-        'success'
-      );
-      return true;
-    }
-
-    // 7. Log Activity for non-Admin deletions
+    // 7. Log Activity (Delete List holds both Admin and Staff deletions; deleting from there archives to separate SQL)
     logActivity({
       actionType: 'DELETE',
       title: `Deleted Purchase Bill #${inv.billNumber}`,
@@ -7681,35 +8379,60 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     showToast(
       language === 'bn'
-        ? `ক্রয় চালান #${inv.billNumber} সফলভাবে ডিলিট হয়েছে এবং 'Delete Purchase' ফাইলে জমা রাখা হয়েছে!`
-        : `Purchase bill #${inv.billNumber} deleted and saved to Delete Purchase archive!`,
+        ? `ক্রয় চালান #${inv.billNumber} ডিলিট লিস্টে (Delete Purchase Archive) রাখা হয়েছে! সেখান থেকে ডিলিট করলে আলাদা SQL ফাইলে জমা থাকবে।`
+        : `Purchase bill #${inv.billNumber} moved to Delete Purchase archive! Deleting from there saves it to separate SQL archive.`,
       'success'
     );
 
     return true;
   };
 
-  const restoreDeletedPurchaseInvoice = (deletedPurchaseId: string): boolean => {
-    const record = deletedPurchaseInvoices.find(d => d.id === deletedPurchaseId || d.originalPurchaseId === deletedPurchaseId);
-    if (!record || !record.invoiceSnapshot) {
-      showToast(language === 'bn' ? 'ডিলিট করা ক্রয় চালানটি পাওয়া যায়নি!' : 'Deleted purchase record not found!', 'error');
-      return false;
-    }
+  const applyRestoredPurchaseInvoice = (
+    restoredInv: PurchaseInvoice,
+    linkedReturns: PurchaseReturn[] = []
+  ): boolean => {
+    lastPushTimeRef.current = Date.now();
+    hasUnsyncedChangesRef.current = true;
 
-    const restoredInv: PurchaseInvoice = record.invoiceSnapshot;
-
-    // 1. Add back product stocks and batches (normalized to base units)
+    // 1. Add back net un-returned product stocks and batches (normalized to base units)
     setProducts(prevProds =>
       prevProds.map(prod => {
-        const boughtItems = restoredInv.items.filter(i => i.productId === prod.id);
+        const boughtItems = (restoredInv.items || []).filter(i => i.productId === prod.id);
         if (boughtItems.length === 0) return prod;
+
+        const alreadyReturnedBaseQty = linkedReturns.reduce((retSum, r) => {
+          const matchingRetItems = (r.items || []).filter(ri => ri.productId === prod.id);
+          return (
+            retSum +
+            matchingRetItems.reduce(
+              (s, ri) =>
+                s +
+                getBaseQuantity(
+                  {
+                    quantity: ri.returnQuantity,
+                    unit: ri.unit,
+                    conversionFactor: ri.conversionFactor,
+                    baseQuantity: ri.baseQuantity,
+                  },
+                  prod
+                ),
+              0
+            )
+          );
+        }, 0);
 
         const existingBatches = prod.batches ? [...prod.batches.map(b => ({ ...b }))] : [];
         let newStock = Number(prod.stock || 0);
+        let remReturnedOffset = alreadyReturnedBaseQty;
 
         for (const itemPurchased of boughtItems) {
           const factor = getEffectiveConversionFactor(itemPurchased, prod);
-          const addedBaseQty = getBaseQuantity(itemPurchased, prod);
+          const origBaseQty = getBaseQuantity(itemPurchased, prod);
+          const skipRet = Math.min(origBaseQty, remReturnedOffset);
+          remReturnedOffset = Math.max(0, Number((remReturnedOffset - skipRet).toFixed(4)));
+          const addedBaseQty = Math.max(0, Number((origBaseQty - skipRet).toFixed(4)));
+          if (addedBaseQty <= 0) continue;
+
           const basePurchasePrice =
             Number(itemPurchased.purchasePrice || 0) > 0
               ? computeNormalizedItemCost(Number(itemPurchased.purchasePrice), factor)
@@ -7771,7 +8494,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           if (p.id === restoredInv.supplierId) {
             return {
               ...p,
-              currentBalance: p.currentBalance + restoredInv.dueAmount,
+              currentBalance: Number((p.currentBalance + restoredInv.dueAmount).toFixed(2)),
             };
           }
           return p;
@@ -7780,25 +8503,83 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     // 3. Deduct wallet balance for paid amount if paid
-    if (restoredInv.paidAmount > 0 && restoredInv.walletId) {
+    if (Number(restoredInv.paidAmount || 0) > 0 && restoredInv.paymentMethod !== 'DUE') {
       setWallets(prevWallets =>
-        prevWallets.map(w => {
-          if (w.id === restoredInv.walletId) {
-            return {
-              ...w,
-              balance: Math.max(0, w.balance - restoredInv.paidAmount),
-            };
-          }
-          return w;
-        })
+        deductAmountFromWallets(prevWallets, restoredInv.paidAmount, restoredInv.walletId, restoredInv.walletName)
       );
     }
 
-    // 4. Put back into active purchaseInvoices & clear tombstone
+    // 4. Put back into active purchaseInvoices, linked returns & restore PURCHASE DayBook entry + clear tombstones
     removeDeletedTombstones('purchaseInvoices', [restoredInv.id, restoredInv.billNumber]);
+    removeDeletedTombstones('dayBookEntries', [`db-pur-${restoredInv.id}`]);
     setPurchaseInvoices(prev => [restoredInv, ...prev.filter(i => i.id !== restoredInv.id)]);
 
-    // 5. Remove from deletedPurchaseInvoices
+    if (linkedReturns.length > 0) {
+      removeDeletedTombstones(
+        'purchaseReturns',
+        linkedReturns.flatMap(r => [r.id, r.returnNumber])
+      );
+      setPurchaseReturns(prev => {
+        const existingIds = new Set(prev.map(r => r.id));
+        const toAdd = linkedReturns.filter(r => !existingIds.has(r.id));
+        return [...toAdd, ...prev];
+      });
+    }
+
+    setDayBookEntries(prev => {
+      const exists = prev.some(
+        d =>
+          d.type === 'PURCHASE' &&
+          (d.referenceId === restoredInv.id ||
+            d.id === `db-pur-${restoredInv.id}` ||
+            d.voucherNo === restoredInv.billNumber)
+      );
+      if (exists) return prev;
+      const resolvedWalletId =
+        restoredInv.paidAmount > 0 && restoredInv.walletId && !NON_CASH_WALLET_IDS.has(restoredInv.walletId)
+          ? restoredInv.walletId
+          : restoredInv.paidAmount > 0
+            ? 'w-cash'
+            : 'due';
+      const resolvedWalletName =
+        restoredInv.paidAmount > 0
+          ? (wallets.find(w => w.id === resolvedWalletId)?.name || restoredInv.walletName || 'Cash')
+          : 'Credit / বাকি';
+      const restoredDbEntry: DayBookEntry = {
+        id: `db-pur-${restoredInv.id}`,
+        voucherNo: restoredInv.billNumber,
+        date: restoredInv.date,
+        type: 'PURCHASE',
+        flow: 'OUT',
+        partyId: restoredInv.supplierId,
+        partyName: restoredInv.supplierName,
+        partyType: 'SUPPLIER',
+        amount: restoredInv.paidAmount || 0,
+        walletId: resolvedWalletId,
+        walletName: resolvedWalletName,
+        referenceId: restoredInv.id,
+        referenceNo: restoredInv.billNumber,
+        remarks: `Restored Purchase bill from ${restoredInv.supplierName} (Total: ৳${restoredInv.grandTotal.toLocaleString()})`,
+        createdBy: currentUser?.id || 'usr-1',
+        createdAt: restoredInv.createdAt || `${restoredInv.date} 12:00:00`,
+      };
+      return [restoredDbEntry, ...prev];
+    });
+
+    return true;
+  };
+
+  const restoreDeletedPurchaseInvoice = (deletedPurchaseId: string): boolean => {
+    const record = deletedPurchaseInvoices.find(d => d.id === deletedPurchaseId || d.originalPurchaseId === deletedPurchaseId);
+    if (!record || !record.invoiceSnapshot) {
+      showToast(language === 'bn' ? 'ডিলিট করা ক্রয় চালানটি পাওয়া যায়নি!' : 'Deleted purchase record not found!', 'error');
+      return false;
+    }
+
+    const restoredInv: PurchaseInvoice = record.invoiceSnapshot;
+    applyRestoredPurchaseInvoice(restoredInv, record.linkedPurchaseReturns || []);
+
+    // Remove from deletedPurchaseInvoices
     recordDeletedTombstones('deletedPurchaseInvoices', [record.id]);
     setDeletedPurchaseInvoices(prev => {
       const updated = prev.filter(d => d.id !== record.id);
@@ -7808,7 +8589,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return updated;
     });
 
-    // 6. Log Activity
+    // Log Activity
     logActivity({
       actionType: 'USER_ACTION',
       title: `Restored Purchase Bill #${restoredInv.billNumber}`,
@@ -8479,9 +9260,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       })
     );
 
-    // 2. Revert Supplier Balance (Total Payable restored)
+    const targetOrigBill = purchaseInvoices.find(
+      b => b.id === targetReturn.purchaseId || b.billNumber === targetReturn.originalBillNumber
+    );
+    const hasActiveOrigBill = Boolean(targetOrigBill);
+
+    // 2. Revert Supplier Balance (Total Payable restored ONLY if original bill is still active)
     const partyDueToRestore = Number(targetReturn.partyDueReduced || 0);
-    if (partyDueToRestore > 0 && targetReturn.supplierId) {
+    if (hasActiveOrigBill && partyDueToRestore > 0 && targetReturn.supplierId) {
       setParties(prevParties =>
         prevParties.map(p => {
           if (p.id === targetReturn.supplierId) {
@@ -8500,14 +9286,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const subDelta = Number(targetReturn.invoiceSubtotalDelta ?? 0);
     const paidDelta = Number(targetReturn.invoicePaidDelta ?? 0);
     const dueDelta = Number(targetReturn.invoiceDueDelta ?? 0);
-    if (grandDelta > 0 || subDelta > 0 || paidDelta > 0 || dueDelta > 0) {
+    if (hasActiveOrigBill && targetOrigBill && (grandDelta > 0 || subDelta > 0 || paidDelta > 0 || dueDelta > 0)) {
       const remainingReturnsCount = purchaseReturns.filter(
-        r => r.purchaseId === targetReturn.purchaseId && r.id !== targetReturn.id
+        r => (r.purchaseId === targetOrigBill.id || r.originalBillNumber === targetOrigBill.billNumber) && r.id !== targetReturn.id
       ).length;
 
       setPurchaseInvoices(prevBills =>
         prevBills.map(bill => {
-          if (bill.id !== targetReturn.purchaseId) return bill;
+          if (bill.id !== targetOrigBill.id) return bill;
           const restoredGrand = Number((bill.grandTotal + grandDelta).toFixed(2));
           const restoredSub = Number((bill.subtotal + subDelta).toFixed(2));
           const restoredPaid = Number((bill.paidAmount + paidDelta).toFixed(2));
@@ -8530,22 +9316,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       );
     }
 
-    // 4. Revert wallet balance for actual cash refund only (never below 0) & remove DayBook entry
+    // 4. Revert wallet balance for actual cash refund only (ONLY if original bill is still active) & remove DayBook entry
     const cashToRevert =
       targetReturn.cashRefunded !== undefined ? Number(targetReturn.cashRefunded) : Number(targetReturn.totalAmount || 0);
-    if (cashToRevert > 0 && targetReturn.refundWalletId && targetReturn.refundWalletId !== 'credit') {
+    if (
+      hasActiveOrigBill &&
+      cashToRevert > 0 &&
+      targetReturn.refundWalletId &&
+      !NON_CASH_WALLET_IDS.has(String(targetReturn.refundWalletId).toLowerCase())
+    ) {
       setWallets(prevWallets =>
-        prevWallets.map(w => {
-          if (w.id === targetReturn.refundWalletId) {
-            return {
-              ...w,
-              balance: Math.max(0, Number((w.balance - cashToRevert).toFixed(2))),
-            };
-          }
-          return w;
-        })
+        deductAmountFromWallets(prevWallets, cashToRevert, targetReturn.refundWalletId, targetReturn.refundWalletName)
       );
     }
+
+    lastPushTimeRef.current = Date.now();
+    hasUnsyncedChangesRef.current = true;
 
     const removedDayBookIds = dayBookEntries
       .filter(db => db.voucherNo === targetReturn.returnNumber)
@@ -10475,6 +11261,412 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     );
   };
 
+  const restoreFromAdminDeletedArchive = async (
+    record: AdminDeletedRecord,
+    options?: { removeFromArchive?: boolean; silent?: boolean }
+  ): Promise<boolean> => {
+    if (!isAdminUser()) {
+      if (!options?.silent) {
+        showToast(
+          language === 'bn'
+            ? 'অনুমতি নেই! শুধুমাত্র অ্যাডমিন SQL আর্কাইভ থেকে ডাটা ফিরিয়ে আনতে পারবেন।'
+            : 'Access denied! Only Admin can restore records from the separate SQL archive.',
+          'error'
+        );
+      }
+      return false;
+    }
+
+    const snap = record?.recordSnapshot;
+    if (!record || !snap) {
+      if (!options?.silent) {
+        showToast(
+          language === 'bn'
+            ? 'এই রেকর্ডের সম্পূর্ণ ডাটা পাওয়া যায়নি!'
+            : 'Snapshot data is missing for this archived record!',
+          'error'
+        );
+      }
+      return false;
+    }
+
+    lastPushTimeRef.current = Date.now();
+    hasUnsyncedChangesRef.current = true;
+    let restoredOk = false;
+
+    const eType = String(record.entityType || '').toUpperCase();
+
+    switch (eType) {
+      case 'ARCHIVED_SALE_INVOICE':
+      case 'SALE_INVOICE': {
+        const inv: SaleInvoice | undefined =
+          eType === 'ARCHIVED_SALE_INVOICE' ? (snap.invoiceSnapshot || snap) : snap;
+        if (inv && inv.id) {
+          if (saleInvoices.some(s => s.id === inv.id)) {
+            restoredOk = true;
+          } else {
+            const linkedRets: SaleReturn[] = Array.isArray(snap.linkedSaleReturns) ? snap.linkedSaleReturns : [];
+            const linkedSchs: InstallmentScheme[] = Array.isArray(snap.linkedInstallmentSchemes)
+              ? snap.linkedInstallmentSchemes
+              : [];
+            restoredOk = applyRestoredSaleInvoice(inv, linkedRets, linkedSchs);
+          }
+          // Ensure it is not left orphaned in deletedSaleInvoices either
+          if (snap.id && deletedSaleInvoices.some(d => d.id === snap.id)) {
+            recordDeletedTombstones('deletedSaleInvoices', [snap.id]);
+            setDeletedSaleInvoices(prev => {
+              const next = prev.filter(d => d.id !== snap.id);
+              try {
+                localStorage.setItem('DOKANPRO_DELETED_INVOICES_ARCHIVE', JSON.stringify(next));
+              } catch {}
+              return next;
+            });
+          }
+        }
+        break;
+      }
+
+      case 'ARCHIVED_PURCHASE_INVOICE':
+      case 'PURCHASE_INVOICE': {
+        const pur: PurchaseInvoice | undefined =
+          eType === 'ARCHIVED_PURCHASE_INVOICE' ? (snap.invoiceSnapshot || snap) : snap;
+        if (pur && pur.id) {
+          if (purchaseInvoices.some(p => p.id === pur.id)) {
+            restoredOk = true;
+          } else {
+            const linkedRets: PurchaseReturn[] = Array.isArray(snap.linkedPurchaseReturns)
+              ? snap.linkedPurchaseReturns
+              : [];
+            restoredOk = applyRestoredPurchaseInvoice(pur, linkedRets);
+          }
+          if (snap.id && deletedPurchaseInvoices.some(d => d.id === snap.id)) {
+            recordDeletedTombstones('deletedPurchaseInvoices', [snap.id]);
+            setDeletedPurchaseInvoices(prev => {
+              const next = prev.filter(d => d.id !== snap.id);
+              try {
+                localStorage.setItem('DOKANPRO_DELETED_PURCHASES_ARCHIVE', JSON.stringify(next));
+              } catch {}
+              return next;
+            });
+          }
+        }
+        break;
+      }
+
+      case 'PRODUCT': {
+        if (snap.id) {
+          removeDeletedTombstones('products', [snap.id]);
+          setDeletedProductIds(prev => prev.filter(id => id !== snap.id));
+          setProducts(prev => {
+            if (prev.some(p => p.id === snap.id)) return prev;
+            const next = [snap as Product, ...prev];
+            try {
+              localStorage.setItem('DOKANPRO_PRODUCTS_BACKUP', JSON.stringify(next));
+            } catch {}
+            return next;
+          });
+          restoredOk = true;
+        }
+        break;
+      }
+
+      case 'PRODUCT_BATCH': {
+        if (snap.batch && snap.productId) {
+          setProducts(prev =>
+            prev.map(p => {
+              if (p.id !== snap.productId) return p;
+              const existingBatches = p.batches ? [...p.batches] : [];
+              if (existingBatches.some(b => b.id === snap.batch.id)) return p;
+              const updatedBatches = [...existingBatches, snap.batch];
+              const totalStock = updatedBatches.reduce((s, b) => s + Number(b.stock || 0), 0);
+              return { ...p, batches: updatedBatches, stock: Number(totalStock.toFixed(4)) };
+            })
+          );
+          restoredOk = true;
+        }
+        break;
+      }
+
+      case 'CATEGORY': {
+        if (snap.id) {
+          removeDeletedTombstones('categories', [snap.id]);
+          setCategories(prev => (prev.some(c => c.id === snap.id) ? prev : [snap as Category, ...prev]));
+          restoredOk = true;
+        }
+        break;
+      }
+
+      case 'CUSTOMER':
+      case 'SUPPLIER': {
+        if (snap.id) {
+          removeDeletedTombstones('parties', [snap.id]);
+          setParties(prev => (prev.some(p => p.id === snap.id) ? prev : [snap as Party, ...prev]));
+          restoredOk = true;
+        }
+        break;
+      }
+
+      case 'SALE_RETURN': {
+        if (snap.id) {
+          removeDeletedTombstones('saleReturns', [snap.id, snap.returnNumber]);
+          setSaleReturns(prev => (prev.some(r => r.id === snap.id) ? prev : [snap as SaleReturn, ...prev]));
+          restoredOk = true;
+        }
+        break;
+      }
+
+      case 'PURCHASE_RETURN': {
+        if (snap.id) {
+          removeDeletedTombstones('purchaseReturns', [snap.id, snap.returnNumber]);
+          setPurchaseReturns(prev => (prev.some(r => r.id === snap.id) ? prev : [snap as PurchaseReturn, ...prev]));
+          restoredOk = true;
+        }
+        break;
+      }
+
+      case 'EXPENSE_VOUCHER': {
+        if (snap.id) {
+          const exp = snap as ExpenseVoucher;
+          const already = expenseVouchers.some(e => e.id === exp.id);
+          if (!already) {
+            removeDeletedTombstones('expenseVouchers', [exp.id]);
+            removeDeletedTombstones('dayBookEntries', [`db-exp-${exp.id}`]);
+            setExpenseVouchers(prev => [exp, ...prev]);
+            if (Number(exp.amount || 0) > 0 && exp.walletId) {
+              setWallets(prev => deductAmountFromWallets(prev, exp.amount, exp.walletId, exp.walletName));
+            }
+            setDayBookEntries(prev => {
+              if (prev.some(d => d.referenceId === exp.id || d.voucherNo === exp.voucherNo)) return prev;
+              const dbEntry: DayBookEntry = {
+                id: `db-exp-${exp.id}`,
+                voucherNo: exp.voucherNo,
+                date: exp.date,
+                type: 'EXPENSE',
+                flow: 'OUT',
+                amount: exp.amount,
+                walletId: exp.walletId,
+                walletName: exp.walletName,
+                referenceId: exp.id,
+                referenceNo: exp.voucherNo,
+                remarks: `${exp.categoryName}: ${exp.note || 'Restored Expense'}`,
+                createdBy: currentUser?.id || 'usr-1',
+                createdAt: exp.createdAt || `${exp.date} 12:00:00`,
+              };
+              return [dbEntry, ...prev];
+            });
+          }
+          restoredOk = true;
+        }
+        break;
+      }
+
+      case 'EXPENSE_CATEGORY': {
+        if (snap.id) {
+          removeDeletedTombstones('expenseCategories', [snap.id]);
+          setExpenseCategories(prev => (prev.some(c => c.id === snap.id) ? prev : [snap as ExpenseCategory, ...prev]));
+          restoredOk = true;
+        }
+        break;
+      }
+
+      case 'WALLET': {
+        if (snap.id) {
+          removeDeletedTombstones('wallets', [snap.id]);
+          setWallets(prev => (prev.some(w => w.id === snap.id) ? prev : [...prev, snap as Wallet]));
+          restoredOk = true;
+        }
+        break;
+      }
+
+      case 'CASH_ADJUSTMENT': {
+        if (snap.id) {
+          removeDeletedTombstones('cashAdjustments', [snap.id]);
+          setCashAdjustments(prev => (prev.some(a => a.id === snap.id) ? prev : [snap as CashAdjustment, ...prev]));
+          restoredOk = true;
+        }
+        break;
+      }
+
+      case 'INSTALLMENT_SCHEME': {
+        if (snap.id) {
+          removeDeletedTombstones('installmentSchemes', [snap.id]);
+          setInstallmentSchemes(prev => (prev.some(s => s.id === snap.id) ? prev : [snap as InstallmentScheme, ...prev]));
+          restoredOk = true;
+        }
+        break;
+      }
+
+      case 'EMPLOYEE': {
+        if (snap.id) {
+          removeDeletedTombstones('employees', [snap.id]);
+          setEmployees(prev => (prev.some(e => e.id === snap.id) ? prev : [snap as Employee, ...prev]));
+          restoredOk = true;
+        }
+        break;
+      }
+
+      case 'USER_ACCOUNT': {
+        if (snap.id) {
+          removeDeletedTombstones('users', [snap.id]);
+          setUsers(prev => (prev.some(u => u.id === snap.id) ? prev : [...prev, snap as UserAccount]));
+          restoredOk = true;
+        }
+        break;
+      }
+
+      case 'QUOTATION': {
+        if (snap.id) {
+          removeDeletedTombstones('quotations', [snap.id]);
+          setQuotations(prev => (prev.some(q => q.id === snap.id) ? prev : [snap as Quotation, ...prev]));
+          restoredOk = true;
+        }
+        break;
+      }
+
+      case 'PURCHASE_ORDER': {
+        if (snap.id) {
+          removeDeletedTombstones('purchaseOrders', [snap.id]);
+          setPurchaseOrders(prev => (prev.some(po => po.id === snap.id) ? prev : [snap as PurchaseOrder, ...prev]));
+          restoredOk = true;
+        }
+        break;
+      }
+
+      case 'SALES_ORDER': {
+        if (snap.id) {
+          removeDeletedTombstones('salesOrders', [snap.id]);
+          setSalesOrders(prev => (prev.some(so => so.id === snap.id) ? prev : [snap as SalesOrder, ...prev]));
+          restoredOk = true;
+        }
+        break;
+      }
+
+      case 'WARRANTY_POLICY': {
+        if (snap.id) {
+          removeDeletedTombstones('warrantyPolicies', [snap.id]);
+          setWarrantyPolicies(prev => (prev.some(wp => wp.id === snap.id) ? prev : [snap as WarrantyPolicy, ...prev]));
+          restoredOk = true;
+        }
+        break;
+      }
+
+      case 'WARRANTY_RECORD': {
+        if (snap.id) {
+          removeDeletedTombstones('warrantyRecords', [snap.id]);
+          setWarrantyRecords(prev => (prev.some(wr => wr.id === snap.id) ? prev : [snap as WarrantyRecord, ...prev]));
+          restoredOk = true;
+        }
+        break;
+      }
+
+      case 'WARRANTY_CLAIM': {
+        if (snap.id) {
+          removeDeletedTombstones('warrantyClaims', [snap.id]);
+          setWarrantyClaims(prev => (prev.some(wc => wc.id === snap.id) ? prev : [snap as WarrantyClaim, ...prev]));
+          restoredOk = true;
+        }
+        break;
+      }
+
+      case 'EXPIRED_RETURN_LOG': {
+        if (snap.id) {
+          removeDeletedTombstones('expiredReturnLogs', [snap.id]);
+          setExpiredReturnLogs(prev => (prev.some(er => er.id === snap.id) ? prev : [snap as ExpiredReturnLog, ...prev]));
+          restoredOk = true;
+        }
+        break;
+      }
+
+      case 'SMS_LOG': {
+        if (snap.id) {
+          removeDeletedTombstones('smsLogs', [snap.id]);
+          setSmsLogs(prev => (prev.some(sl => sl.id === snap.id) ? prev : [snap as SmsLog, ...prev]));
+          restoredOk = true;
+        }
+        break;
+      }
+
+      default:
+        break;
+    }
+
+    if (restoredOk) {
+      if (options?.removeFromArchive !== false) {
+        await removeAdminDeletedArchiveRecords([record.archiveId]);
+      }
+
+      logActivity({
+        actionType: 'USER_ACTION',
+        title: `Restored from Admin SQL Archive: ${record.referenceNo || record.title}`,
+        description: `Admin '${currentUser?.fullName || 'Admin'}' restored ${record.entityType} (${record.title}) from admin_deleted_records.sql back into the ERP.`,
+        severity: 'info',
+        targetId: record.recordId,
+        targetName: record.title,
+      });
+
+      if (!options?.silent) {
+        showToast(
+          language === 'bn'
+            ? `SQL আর্কাইভ থেকে "${record.referenceNo ? `#${record.referenceNo} - ` : ''}${record.title}" সফলভাবে ব্যাক আনা হয়েছে!`
+            : `Restored "${record.referenceNo ? `#${record.referenceNo} - ` : ''}${record.title}" from SQL archive successfully!`,
+          'success'
+        );
+      }
+    } else if (!options?.silent) {
+      showToast(
+        language === 'bn'
+          ? 'এই রেকর্ডটি পুনরুদ্ধার করা সম্ভব হয়নি।'
+          : 'Could not restore this record type automatically.',
+        'warning'
+      );
+    }
+
+    return restoredOk;
+  };
+
+  const restoreMultipleFromAdminDeletedArchive = async (
+    records: AdminDeletedRecord[],
+    options?: { removeFromArchive?: boolean }
+  ): Promise<number> => {
+    if (!isAdminUser() || !Array.isArray(records) || records.length === 0) return 0;
+
+    let restoredCount = 0;
+    const restoredArchiveIds: string[] = [];
+
+    for (const rec of records) {
+      const ok = await restoreFromAdminDeletedArchive(rec, {
+        removeFromArchive: false,
+        silent: true,
+      });
+      if (ok) {
+        restoredCount++;
+        if (rec.archiveId) restoredArchiveIds.push(rec.archiveId);
+      }
+    }
+
+    if (restoredArchiveIds.length > 0 && options?.removeFromArchive !== false) {
+      await removeAdminDeletedArchiveRecords(restoredArchiveIds);
+    }
+
+    if (restoredCount > 0) {
+      showToast(
+        language === 'bn'
+          ? `মোট ${restoredCount}টি রেকর্ড SQL ফাইল থেকে সফলভাবে ব্যাক আনা হয়েছে!`
+          : `Successfully restored ${restoredCount} record(s) from SQL archive!`,
+        'success'
+      );
+    } else {
+      showToast(
+        language === 'bn'
+          ? 'কোনো রেকর্ড ব্যাক আনা যায়নি।'
+          : 'No records could be restored.',
+        'warning'
+      );
+    }
+
+    return restoredCount;
+  };
+
   return (
     <AppContext.Provider
       value={{
@@ -10652,6 +11844,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         triggerSyncNow,
         saveApiEndpoint,
         downloadAdminDeletedSqlFile,
+        fetchAdminDeletedArchive,
+        restoreFromAdminDeletedArchive,
+        restoreMultipleFromAdminDeletedArchive,
       }}
     >
       {children}

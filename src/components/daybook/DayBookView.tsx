@@ -635,7 +635,9 @@ export const DayBookView: React.FC = () => {
             >
               <option value="ALL">All Types</option>
               <option value="SALE">SALE</option>
+              <option value="SALE_RETURN">SALE_RETURN</option>
               <option value="PURCHASE">PURCHASE</option>
+              <option value="PURCHASE_RETURN">PURCHASE_RETURN</option>
               <option value="PAYMENT_IN">PAYMENT_IN</option>
               <option value="PAYMENT_OUT">PAYMENT_OUT</option>
               <option value="EXPENSE">EXPENSE</option>
@@ -765,7 +767,13 @@ export const DayBookView: React.FC = () => {
                           formatCurrency(entry.amount)
                         ) : (
                           <span className="text-zinc-400 dark:text-zinc-500 font-normal text-xs">
-                            {language === 'bn' ? '৳০ (বাকি)' : '৳0 (Credit)'}
+                            {entry.type === 'SALE_RETURN'
+                              ? language === 'bn'
+                                ? '৳০ (ইনভয়েসে সমন্বয়)'
+                                : '৳0 (Inv Adjusted)'
+                              : language === 'bn'
+                                ? '৳০ (বাকি)'
+                                : '৳0 (Credit)'}
                           </span>
                         )
                       ) : (

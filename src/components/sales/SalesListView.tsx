@@ -4,6 +4,7 @@ import { useTranslation } from '../../i18n/translations';
 import { Badge } from '../common/Badge';
 import { DatePeriodFilter } from '../common/DatePeriodFilter';
 import { MultiUserAuditTrail } from '../common/MultiUserAuditTrail';
+import { AdminDeletedSqlVaultModal } from '../common/AdminDeletedSqlVaultModal';
 import { SaleInvoice, DeletedSaleInvoice } from '../../types';
 import { canUserDelete, canUserEdit, canUserReturn } from '../../utils/permissions';
 import {
@@ -40,6 +41,7 @@ import {
   AlertCircle,
   Receipt,
   Edit,
+  Database,
 } from 'lucide-react';
 
 interface SalesListViewProps {
@@ -115,6 +117,7 @@ export const SalesListView: React.FC<SalesListViewProps> = ({
   const [invoiceToRestore, setInvoiceToRestore] = useState<DeletedSaleInvoice | null>(null);
   const [invoiceToPermDelete, setInvoiceToPermDelete] = useState<DeletedSaleInvoice | null>(null);
   const [showClearAllModal, setShowClearAllModal] = useState(false);
+  const [showSqlVaultModal, setShowSqlVaultModal] = useState(false);
 
   // Granular Permission Checks for current logged in user
   const hasDeletePermission = canUserDelete(currentUser, 'sales');
@@ -540,6 +543,17 @@ export const SalesListView: React.FC<SalesListViewProps> = ({
             </>
           ) : (
             <>
+              {currentUser?.role === 'ADMIN' && (
+                <button
+                  type="button"
+                  onClick={() => setShowSqlVaultModal(true)}
+                  className="px-3.5 py-2 bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-950/60 dark:hover:bg-indigo-900/70 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800 rounded-xl text-xs font-bold shadow-xs transition-all flex items-center gap-1.5 cursor-pointer"
+                  title={language === 'bn' ? 'আলাদা SQL ফাইল থেকে ডিলিটকৃত চালান দেখুন ও ব্যাক আনুন' : 'Browse & restore archived sales from separate SQL file'}
+                >
+                  <Database className="w-3.5 h-3.5" />
+                  <span>{language === 'bn' ? 'SQL থেকে ব্যাক আনুন' : 'SQL Archive / Restore'}</span>
+                </button>
+              )}
               <button
                 type="button"
                 onClick={handlePrintDeletedList}
@@ -1786,8 +1800,8 @@ export const SalesListView: React.FC<SalesListViewProps> = ({
                 <li className="font-semibold text-rose-700 dark:text-rose-300">
                   {currentUser?.role === 'ADMIN'
                     ? (language === 'bn'
-                        ? 'অ্যাডমিন আইডি থেকে ডিলিট করলে এটি আর সফটওয়্যারে দেখা যাবে না এবং আলাদা SQL ফাইলে (admin_deleted_records.sql) সেভ থাকবে।'
-                        : 'Deleted by Admin: it will no longer be visible in the software and will be saved in a separate SQL file (admin_deleted_records.sql).')
+                        ? "চালানটি প্রথমে 'Delete Invoice' লিস্টে জমা থাকবে। সেখান থেকে ডিলিট করলে এটি আলাদা SQL ফাইলে (admin_deleted_records.sql) সেভ থাকবে এবং ভবিষ্যতে প্রয়োজন হলে আবার ব্যাক আনা যাবে।"
+                        : "The invoice will first stay in the 'Delete Invoice' list. Deleting it from there saves it into a separate SQL file (admin_deleted_records.sql) so it can be restored anytime later.")
                     : (language === 'bn'
                         ? "চালানটি 'Delete Invoice' আর্কাইভে এবং আলাদা ফাইলে সেভ থাকবে।"
                         : "The invoice will be preserved in 'Delete Invoice' archive & file.")}
@@ -1811,9 +1825,7 @@ export const SalesListView: React.FC<SalesListViewProps> = ({
               >
                 <Trash2 className="w-3.5 h-3.5" />
                 <span>
-                  {currentUser?.role === 'ADMIN'
-                    ? (language === 'bn' ? 'হ্যাঁ, ডিলিট ও SQL-এ সেভ করুন' : 'Yes, Delete & Save SQL')
-                    : (language === 'bn' ? 'হ্যাঁ, ডিলিট ও সেভ করুন' : 'Yes, Delete & Save')}
+                  {language === 'bn' ? 'হ্যাঁ, ডিলিট ও সেভ করুন' : 'Yes, Delete & Save'}
                 </span>
               </button>
             </div>
@@ -1893,9 +1905,13 @@ export const SalesListView: React.FC<SalesListViewProps> = ({
             </div>
 
             <p className="text-xs text-rose-700 dark:text-rose-300">
-              {language === 'bn'
-                ? 'সতর্কতা: এটি সম্পূর্ণ স্থায়ী এবং এই রেকর্ডটি আর্কাইভ থেকে মুছে যাবে। পরবর্তীতে আর পুনরুদ্ধার করা যাবে না।'
-                : 'Warning: This will permanently delete this record from the archive. This cannot be undone.'}
+              {currentUser?.role === 'ADMIN'
+                ? (language === 'bn'
+                    ? 'সতর্কতা: এটি ডিলিট লিস্ট থেকে মুছে আলাদা SQL ফাইলে (admin_deleted_records.sql) সংরক্ষিত থাকবে। ভবিষ্যতে প্রয়োজন হলে সেখান থেকে আবার ব্যাক আনতে পারবেন।'
+                    : 'This will remove it from the Delete List and save a full snapshot in the separate SQL file (admin_deleted_records.sql) so you can restore it anytime later.')
+                : (language === 'bn'
+                    ? 'সতর্কতা: এটি ডিলিট লিস্ট থেকে মুছে যাবে। (অ্যাডমিন SQL ফাইলে সংরক্ষিত থাকবে)।'
+                    : 'Warning: This will remove this record from the Delete List.')}
             </p>
 
             <div className="flex items-center justify-end gap-2 pt-2">
@@ -1938,9 +1954,13 @@ export const SalesListView: React.FC<SalesListViewProps> = ({
             </div>
 
             <p className="text-xs text-slate-600 dark:text-slate-400">
-              {language === 'bn'
-                ? `আপনি কি নিশ্চিত যে সমস্ত ${deletedSaleInvoices.length}টি ডিলিট হওয়া চালানের রেকর্ড স্থায়ীভাবে মুছে ফেলতে চান?`
-                : `Are you sure you want to clear all ${deletedSaleInvoices.length} archived deleted invoices?`}
+              {currentUser?.role === 'ADMIN'
+                ? (language === 'bn'
+                    ? `আপনি কি নিশ্চিত যে সমস্ত ${deletedSaleInvoices.length}টি ডিলিট হওয়া চালান এই লিস্ট থেকে সরিয়ে আলাদা SQL ফাইলে (admin_deleted_records.sql) সংরক্ষণ করতে চান? ভবিষ্যতে প্রয়োজন হলে সেখান থেকে ব্যাক আনা যাবে।`
+                    : `Move all ${deletedSaleInvoices.length} deleted invoices out of the Delete List and archive them into admin_deleted_records.sql? You can restore them later if needed.`)
+                : (language === 'bn'
+                    ? `আপনি কি নিশ্চিত যে সমস্ত ${deletedSaleInvoices.length}টি ডিলিট হওয়া চালানের রেকর্ড ডিলিট লিস্ট থেকে মুছে ফেলতে চান?`
+                    : `Are you sure you want to clear all ${deletedSaleInvoices.length} archived deleted invoices?`)}
             </p>
 
             <div className="flex items-center justify-end gap-2 pt-2">
@@ -1966,6 +1986,12 @@ export const SalesListView: React.FC<SalesListViewProps> = ({
           </div>
         </div>
       )}
+
+      <AdminDeletedSqlVaultModal
+        isOpen={showSqlVaultModal}
+        onClose={() => setShowSqlVaultModal(false)}
+        initialFilter="SALE"
+      />
 
     </div>
   );

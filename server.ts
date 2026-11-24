@@ -13,6 +13,7 @@ import {
   generateFullSqlDump,
   generateFreshCleanSqlDump,
   generateAdminDeletedSqlDump,
+  parseAdminDeletedSqlDump,
   AdminDeletedRecord,
 } from './src/utils/sqlExporter';
 
@@ -283,13 +284,38 @@ function loadAdminDeletedArchiveRecords(): AdminDeletedRecord[] {
   const storageArchive = path.join(__dirname, 'erp_storage', 'admin_deleted_archive.json');
   const rootArchive = path.join(__dirname, 'admin_deleted_archive.json');
   const fileToRead = fs.existsSync(storageArchive) ? storageArchive : (fs.existsSync(rootArchive) ? rootArchive : null);
-  if (!fileToRead) return [];
-  try {
-    const parsed = JSON.parse(fs.readFileSync(fileToRead, 'utf-8'));
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
+  if (fileToRead) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(fileToRead, 'utf-8'));
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    } catch {}
   }
+
+  // Fallback: parse directly from admin_deleted_records.sql if present
+  const storageSql = path.join(__dirname, 'erp_storage', 'admin_deleted_records.sql');
+  const rootSql = path.join(__dirname, 'admin_deleted_records.sql');
+  const sqlToRead = fs.existsSync(storageSql) ? storageSql : (fs.existsSync(rootSql) ? rootSql : null);
+  if (sqlToRead) {
+    try {
+      const sqlText = fs.readFileSync(sqlToRead, 'utf-8');
+      const parsedFromSql = parseAdminDeletedSqlDump(sqlText);
+      if (parsedFromSql.length > 0) return parsedFromSql;
+    } catch {}
+  }
+  return [];
+}
+
+function saveAdminDeletedArchiveRecords(records: AdminDeletedRecord[], shopName?: string): void {
+  const storageDir = path.join(__dirname, 'erp_storage');
+  if (!fs.existsSync(storageDir)) {
+    fs.mkdirSync(storageDir, { recursive: true });
+  }
+  const archiveJsonStr = JSON.stringify(records, null, 2);
+  fs.writeFileSync(path.join(storageDir, 'admin_deleted_archive.json'), archiveJsonStr, 'utf-8');
+  const resolvedShop = shopName || records[0]?.shopName || getCurrentShopName();
+  const sqlContent = generateAdminDeletedSqlDump(records, resolvedShop);
+  fs.writeFileSync(path.join(storageDir, 'admin_deleted_records.sql'), sqlContent, 'utf-8');
+  fs.writeFileSync(path.join(__dirname, 'admin_deleted_records.sql'), sqlContent, 'utf-8');
 }
 
 function getKnownAdminUsers(): Array<{ id?: string; username?: string; role?: string }> {
@@ -307,6 +333,18 @@ function getKnownAdminUsers(): Array<{ id?: string; username?: string; role?: st
   return [];
 }
 
+function verifyAdminRequest(req: Request): boolean {
+  const roleHeader = String(req.headers['x-admin-role'] || '').toUpperCase();
+  if (roleHeader !== 'ADMIN') return false;
+  const knownAdmins = getKnownAdminUsers();
+  if (knownAdmins.length === 0) return true;
+  const headerId = String(req.headers['x-admin-id'] || '');
+  const headerUser = String(req.headers['x-admin-username'] || '').toLowerCase();
+  return knownAdmins.some(
+    a => (headerId && String(a.id || '') === headerId) || (headerUser && String(a.username || '').toLowerCase() === headerUser)
+  );
+}
+
 function getCurrentShopName(): string {
   const snapshotFile = path.join(__dirname, 'erp_data_snapshot.json');
   const backupFile = path.join(__dirname, 'erp_local_backup.json');
@@ -320,6 +358,26 @@ function getCurrentShopName(): string {
     return 'DokanPro ERP';
   }
 }
+
+const handleAdminDeletedArchiveGet = (req: Request, res: Response) => {
+  try {
+    if (!verifyAdminRequest(req)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Admin authorization required to access separate SQL archive.',
+      });
+    }
+    const records = loadAdminDeletedArchiveRecords();
+    return res.json({
+      success: true,
+      records,
+      totalCount: records.length,
+      fileName: 'admin_deleted_records.sql',
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+};
 
 const handleAdminDeletedArchivePost = (req: Request, res: Response) => {
   try {
@@ -360,19 +418,7 @@ const handleAdminDeletedArchivePost = (req: Request, res: Response) => {
       byId.set(String(item.archiveId), item);
     }
     const merged = Array.from(byId.values());
-
-    const storageDir = path.join(__dirname, 'erp_storage');
-    if (!fs.existsSync(storageDir)) {
-      fs.mkdirSync(storageDir, { recursive: true });
-    }
-
-    const archiveJsonStr = JSON.stringify(merged, null, 2);
-    fs.writeFileSync(path.join(storageDir, 'admin_deleted_archive.json'), archiveJsonStr, 'utf-8');
-
-    const shopName = validRecords[0]?.shopName || getCurrentShopName();
-    const sqlContent = generateAdminDeletedSqlDump(merged, shopName);
-    fs.writeFileSync(path.join(storageDir, 'admin_deleted_records.sql'), sqlContent, 'utf-8');
-    fs.writeFileSync(path.join(__dirname, 'admin_deleted_records.sql'), sqlContent, 'utf-8');
+    saveAdminDeletedArchiveRecords(merged, validRecords[0]?.shopName);
 
     return res.json({
       success: true,
@@ -386,8 +432,47 @@ const handleAdminDeletedArchivePost = (req: Request, res: Response) => {
   }
 };
 
+const handleAdminDeletedArchiveRemove = (req: Request, res: Response) => {
+  try {
+    if (!verifyAdminRequest(req)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Admin authorization required to modify separate SQL archive.',
+      });
+    }
+    const body = req.body || {};
+    const idsToRemove = new Set<string>(
+      Array.isArray(body.archiveIds)
+        ? body.archiveIds.map(String)
+        : body.archiveId
+          ? [String(body.archiveId)]
+          : []
+    );
+
+    if (idsToRemove.size === 0) {
+      return res.status(400).json({ success: false, message: 'No archiveId provided.' });
+    }
+
+    const existing = loadAdminDeletedArchiveRecords();
+    const remaining = existing.filter(item => item?.archiveId && !idsToRemove.has(String(item.archiveId)));
+    saveAdminDeletedArchiveRecords(remaining);
+
+    return res.json({
+      success: true,
+      remainingCount: remaining.length,
+      records: remaining,
+      fileName: 'admin_deleted_records.sql',
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+};
+
 const handleAdminDeletedSqlDownload = (req: Request, res: Response) => {
   try {
+    if (!verifyAdminRequest(req)) {
+      return res.status(403).send('-- Error: Admin authorization required to download admin_deleted_records.sql');
+    }
     const records = loadAdminDeletedArchiveRecords();
     const shopName = getCurrentShopName();
     const sqlContent = generateAdminDeletedSqlDump(records, shopName);
@@ -408,7 +493,9 @@ const handleAdminDeletedSqlDownload = (req: Request, res: Response) => {
   }
 };
 
+app.get('/api/admin-deleted-archive', handleAdminDeletedArchiveGet);
 app.post('/api/admin-deleted-archive', handleAdminDeletedArchivePost);
+app.post('/api/admin-deleted-archive/remove', handleAdminDeletedArchiveRemove);
 app.get('/api/download-admin-deleted-sql', handleAdminDeletedSqlDownload);
 app.get('/download-admin-deleted-sql', handleAdminDeletedSqlDownload);
 app.get('/admin_deleted_records.sql', handleAdminDeletedSqlDownload);
@@ -418,10 +505,16 @@ app.post('/api.php', (req: Request, res: Response) => {
   if (req.query.action === 'archive_admin_deleted') {
     return handleAdminDeletedArchivePost(req, res);
   }
+  if (req.query.action === 'remove_admin_deleted_archive') {
+    return handleAdminDeletedArchiveRemove(req, res);
+  }
   return handleSyncPost(req, res);
 });
 app.get('/api/sync', handleSyncGet);
 app.get('/api.php', (req: Request, res: Response) => {
+  if (req.query.action === 'get_admin_deleted_archive') {
+    return handleAdminDeletedArchiveGet(req, res);
+  }
   if (req.query.action === 'download_admin_deleted_sql') {
     return handleAdminDeletedSqlDownload(req, res);
   }

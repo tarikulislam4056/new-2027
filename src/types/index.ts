@@ -309,6 +309,8 @@ export interface DeletedSaleInvoice {
   };
   deletionReason?: string;
   invoiceSnapshot: SaleInvoice;
+  linkedSaleReturns?: SaleReturn[];
+  linkedInstallmentSchemes?: InstallmentScheme[];
 }
 
 export interface SaleReturn {
@@ -460,6 +462,7 @@ export interface DeletedPurchaseInvoice {
   };
   deletionReason?: string;
   invoiceSnapshot: PurchaseInvoice;
+  linkedPurchaseReturns?: PurchaseReturn[];
 }
 
 export interface DeletedProduct {
