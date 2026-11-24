@@ -829,79 +829,54 @@ export const HrPayrollView: React.FC = () => {
         </div>
       </div>
 
-      {/* 3. Sub-Tab Navigation Bar */}
-      <div className="flex flex-wrap items-center gap-2 border-b border-slate-200 dark:border-slate-800 pb-2">
-        <button
-          type="button"
-          onClick={() => {
-            setSubTab('employees');
-            setSearchTerm('');
-          }}
-          className={`px-4 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-2 ${
-            subTab === 'employees'
-              ? 'bg-blue-600 text-white shadow-xs'
-              : 'text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800'
-          }`}
-        >
-          <Users className="w-4 h-4" />
-          <span>{language === 'bn' ? '১. কর্মরত কর্মচারী তালিকা' : '1. Active Staff Directory'}</span>
-          <span
-            className={`px-1.5 py-0.2 rounded-full text-[10px] font-mono ${
-              subTab === 'employees' ? 'bg-white/20 text-white' : 'bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-300'
-            }`}
+      {/* Active HR Button (Only the clicked HR item appears) */}
+      <div className="flex items-center justify-between gap-2 border-b border-slate-200 dark:border-slate-800 pb-2">
+        {subTab === 'employees' && (
+          <button
+            type="button"
+            onClick={() => setSubTab('employees')}
+            className="px-4 py-2 rounded-xl text-xs font-bold bg-blue-600 text-white shadow-xs cursor-pointer flex items-center gap-2"
           >
-            {activeEmployees.length}
-          </span>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => {
-            setSubTab('resigned');
-            setSearchTerm('');
-          }}
-          className={`px-4 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-2 ${
-            subTab === 'resigned'
-              ? 'bg-rose-600 text-white shadow-xs'
-              : 'text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800'
-          }`}
-        >
-          <UserX className="w-4 h-4" />
-          <span>{language === 'bn' ? '২. রিজাইনড / প্রাক্তন কর্মচারী' : '2. Resigned & Former Staff'}</span>
-          <span
-            className={`px-1.5 py-0.2 rounded-full text-[10px] font-mono ${
-              subTab === 'resigned' ? 'bg-white/20 text-white' : 'bg-rose-100 dark:bg-rose-950/60 text-rose-700 dark:text-rose-300'
-            }`}
+            <Users className="w-4 h-4" />
+            <span>{language === 'bn' ? '১. কর্মরত কর্মচারী তালিকা' : '1. Active Staff Directory'}</span>
+            <span className="px-1.5 py-0.2 rounded-full text-[10px] font-mono bg-white/20 text-white">
+              {activeEmployees.length}
+            </span>
+          </button>
+        )}
+        {subTab === 'resigned' && (
+          <button
+            type="button"
+            onClick={() => setSubTab('resigned')}
+            className="px-4 py-2 rounded-xl text-xs font-bold bg-rose-600 text-white shadow-xs cursor-pointer flex items-center gap-2"
           >
-            {resignedEmployees.length}
-          </span>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => setSubTab('advance')}
-          className={`px-4 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-2 ${
-            subTab === 'advance'
-              ? 'bg-blue-600 text-white shadow-xs'
-              : 'text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800'
-          }`}
-        >
-          <DollarSign className="w-4 h-4" />
-          <span>{language === 'bn' ? '৩. অগ্রিম বেতন লেজার' : '3. Advance Salary Ledger'}</span>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => setSubTab('payroll')}
-          className={`px-4 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-2 ${
-            subTab === 'payroll'
-              ? 'bg-blue-600 text-white shadow-xs'
-              : 'text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800'
-          }`}
-        >
-          <FileSpreadsheet className="w-4 h-4" />
-          <span>{language === 'bn' ? '৪. মাসিক পে-রোল প্রসেসিং' : '4. Monthly Payroll Processing'}</span>
-        </button>
+            <UserX className="w-4 h-4" />
+            <span>{language === 'bn' ? '২. রিজাইনড / প্রাক্তন কর্মচারী' : '2. Resigned & Former Staff'}</span>
+            <span className="px-1.5 py-0.2 rounded-full text-[10px] font-mono bg-white/20 text-white">
+              {resignedEmployees.length}
+            </span>
+          </button>
+        )}
+        {subTab === 'advance' && (
+          <button
+            type="button"
+            onClick={() => setSubTab('advance')}
+            className="px-4 py-2 rounded-xl text-xs font-bold bg-blue-600 text-white shadow-xs cursor-pointer flex items-center gap-2"
+          >
+            <DollarSign className="w-4 h-4" />
+            <span>{language === 'bn' ? '৩. অগ্রিম বেতন লেজার' : '3. Advance Salary Ledger'}</span>
+          </button>
+        )}
+        {subTab === 'payroll' && (
+          <button
+            type="button"
+            onClick={() => setSubTab('payroll')}
+            className="px-4 py-2 rounded-xl text-xs font-bold bg-blue-600 text-white shadow-xs cursor-pointer flex items-center gap-2"
+          >
+            <FileSpreadsheet className="w-4 h-4" />
+            <span>{language === 'bn' ? '৪. মাসিক পে-রোল প্রসেসিং' : '4. Monthly Payroll Processing'}</span>
+          </button>
+        )}
       </div>
 
       {/* ------------------------------------------------------------- */}

@@ -36,6 +36,7 @@ import {
   Phone,
   MapPin,
   ShieldAlert,
+  TrendingUp,
 } from 'lucide-react';
 
 interface SidebarProps {
@@ -799,18 +800,25 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   </button>
                   <button
                     type="button"
-                    onClick={() => handleSubReportClick('low-stock')}
-                    className="w-full text-left py-1.5 px-2.5 rounded-lg font-bold text-amber-600 dark:text-amber-400 hover:bg-amber-50/70 dark:hover:bg-amber-950/40 transition-colors cursor-pointer truncate flex items-center gap-1"
+                    onClick={() => handleSubReportClick('profit-loss')}
+                    className="w-full text-left py-1.5 px-2.5 rounded-lg font-bold text-emerald-600 dark:text-emerald-400 hover:bg-emerald-50/70 dark:hover:bg-emerald-950/40 transition-colors cursor-pointer truncate flex items-center gap-1.5"
                   >
-                    <span>⚠️</span>
-                    <span>{language === 'bn' ? 'স্টক অ্যালার্ট রিপোর্ট' : 'Low Stock Report'}</span>
+                    <TrendingUp className="w-4 h-4 shrink-0" />
+                    <span>Profit &amp; Loss</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleSubReportClick('low-stock')}
+                    className="w-full text-left py-1.5 px-2.5 rounded-lg font-bold text-amber-600 dark:text-amber-400 hover:bg-amber-50/70 dark:hover:bg-amber-950/40 transition-colors cursor-pointer truncate"
+                  >
+                    {language === 'bn' ? 'স্টক অ্যালার্ট রিপোর্ট' : 'Low Stock Report'}
                   </button>
                   <button
                     type="button"
                     onClick={() => handleSubReportClick('batch-report')}
-                    className="w-full text-left py-1.5 px-2.5 rounded-lg font-bold text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50/70 dark:hover:bg-indigo-950/40 transition-colors cursor-pointer truncate flex items-center gap-1"
+                    className="w-full text-left py-1.5 px-2.5 rounded-lg font-bold text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50/70 dark:hover:bg-indigo-950/40 transition-colors cursor-pointer truncate"
                   >
-                    <span>{language === 'bn' ? '📦 ব্যাচ ও মেয়াদ রিপোর্ট' : '📦 Batch & Expiry Report'}</span>
+                    {language === 'bn' ? 'ব্যাচ ও মেয়াদ রিপোর্ট' : 'Batch & Expiry Report'}
                   </button>
                   {companySettings.businessModule === 'pharmacy' && (
                     <button

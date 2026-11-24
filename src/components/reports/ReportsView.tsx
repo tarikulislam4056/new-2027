@@ -5,6 +5,7 @@ import { DatePeriodFilter } from '../common/DatePeriodFilter';
 import { BatchReportView, BatchReportHandle } from './BatchReportView';
 import { ExpiryReportView } from './ExpiryReportView';
 import { GenericReportView } from './GenericReportView';
+import { ProfitLossReportView, ProfitLossReportHandle } from './ProfitLossReportView';
 import {
   canUserExportReportCsv,
   canUserDownloadReportPdf,
@@ -41,7 +42,6 @@ import {
   Percent,
   RotateCcw,
   CheckCircle2,
-  AlertCircle,
   Tag,
   Boxes,
   Clock,
@@ -50,6 +50,7 @@ import {
 
 export type ReportKind =
   | 'summary'
+  | 'profit-loss'
   | 'low-stock'
   | 'batch-report'
   | 'ledger'
@@ -87,6 +88,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ initialReportType = 's
   } = useApp();
   const { t } = useTranslation(language);
   const batchReportRef = useRef<BatchReportHandle>(null);
+  const profitLossReportRef = useRef<ProfitLossReportHandle>(null);
 
   const isPharmacyMode = companySettings?.businessModule === 'pharmacy';
 
@@ -1238,6 +1240,11 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ initialReportType = 's
       return;
     }
 
+    if (reportType === 'profit-loss') {
+      profitLossReportRef.current?.printReport(autoDownloadPdf);
+      return;
+    }
+
     if (reportType === 'summary') {
       const reportTitle = language === 'bn' ? 'স্টক সারসংক্ষেপ ও ইনভেন্টরি মূল্যায়ন' : 'STOCK SUMMARY & VALUATION REPORT';
       const filteredCostVal = filteredStockSummaryProducts.reduce((s, p) => s + Number(p.stock || 0) * Number(p.purchasePrice || 0), 0);
@@ -1749,6 +1756,11 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ initialReportType = 's
       return;
     }
 
+    if (reportType === 'profit-loss') {
+      profitLossReportRef.current?.exportCsv();
+      return;
+    }
+
     if (reportType === 'low-stock') {
       handleExportLowStockCSV();
       return;
@@ -1919,116 +1931,95 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ initialReportType = 's
         language={language}
       />
 
-      {/* Navigation Sub-Tabs */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-1.5 p-1.5 bg-slate-100 dark:bg-slate-900/80 rounded-xl border border-slate-200 dark:border-slate-800 text-xs">
-        <button
-          type="button"
-          onClick={() => setReportType('summary')}
-          className={`py-2 px-1.5 rounded-lg font-semibold truncate transition-colors cursor-pointer text-center ${
-            reportType === 'summary'
-              ? 'bg-blue-600 text-white shadow-xs'
-              : 'text-slate-600 dark:text-slate-400 hover:bg-white/60 dark:hover:bg-slate-800'
-          }`}
-          title={language === 'bn' ? 'স্টক সারসংক্ষেপ' : 'Stock Summary'}
-        >
-          {language === 'bn' ? 'স্টক সামারি' : 'Stock Summary'}
-        </button>
-        <button
-          type="button"
-          onClick={() => setReportType('low-stock')}
-          className={`py-2 px-1.5 rounded-lg font-semibold truncate transition-colors cursor-pointer text-center flex items-center justify-center gap-1 ${
-            reportType === 'low-stock'
-              ? 'bg-amber-600 text-white shadow-xs'
-              : 'text-slate-600 dark:text-slate-400 hover:bg-white/60 dark:hover:bg-slate-800'
-          }`}
-          title={language === 'bn' ? 'স্টক অ্যালার্ট রিপোর্ট' : 'Low Stock Report'}
-        >
-          <AlertCircle className="w-3.5 h-3.5" />
-          <span>{language === 'bn' ? 'স্টক অ্যালার্ট রিপোর্ট' : 'Low Stock Report'}</span>
-        </button>
-        <button
-          type="button"
-          onClick={() => setReportType('batch-report')}
-          className={`py-2 px-1.5 rounded-lg font-semibold truncate transition-colors cursor-pointer text-center flex items-center justify-center gap-1 ${
-            reportType === 'batch-report'
-              ? 'bg-indigo-600 text-white shadow-xs'
-              : 'text-slate-600 dark:text-slate-400 hover:bg-white/60 dark:hover:bg-slate-800'
-          }`}
-          title={language === 'bn' ? 'ব্যাচ ও মেয়াদভিত্তিক রিপোর্ট' : 'Batch & Expiry Report'}
-        >
-          <Boxes className="w-3.5 h-3.5" />
-          <span>{language === 'bn' ? 'ব্যাচ ও মেয়াদ রিপোর্ট' : 'Batch Report'}</span>
-        </button>
-        <button
-          type="button"
-          onClick={() => setReportType('ledger')}
-          className={`py-2 px-1.5 rounded-lg font-semibold truncate transition-colors cursor-pointer text-center ${
-            reportType === 'ledger'
-              ? 'bg-blue-600 text-white shadow-xs'
-              : 'text-slate-600 dark:text-slate-400 hover:bg-white/60 dark:hover:bg-slate-800'
-          }`}
-          title={language === 'bn' ? 'আইটেম লেজার' : 'Item Details & Ledger'}
-        >
-          {language === 'bn' ? 'আইটেম লেজার' : 'Item Ledger'}
-        </button>
-        <button
-          type="button"
-          onClick={() => setReportType('item-sales')}
-          className={`py-2 px-1.5 rounded-lg font-semibold truncate transition-colors cursor-pointer text-center ${
-            reportType === 'item-sales'
-              ? 'bg-blue-600 text-white shadow-xs'
-              : 'text-slate-600 dark:text-slate-400 hover:bg-white/60 dark:hover:bg-slate-800'
-          }`}
-          title={language === 'bn' ? 'আইটেম ভিত্তিক বিক্রয়' : 'Item Wise Sales'}
-        >
-          {language === 'bn' ? 'আইটেম বিক্রয়' : 'Item Sales'}
-        </button>
-        <button
-          type="button"
-          onClick={() => setReportType('item-purchase')}
-          className={`py-2 px-1.5 rounded-lg font-semibold truncate transition-colors cursor-pointer text-center ${
-            reportType === 'item-purchase'
-              ? 'bg-blue-600 text-white shadow-xs'
-              : 'text-slate-600 dark:text-slate-400 hover:bg-white/60 dark:hover:bg-slate-800'
-          }`}
-          title={language === 'bn' ? 'আইটেম ভিত্তিক ক্রয়' : 'Item Wise Purchase'}
-        >
-          {language === 'bn' ? 'আইটেম ক্রয়' : 'Item Purchase'}
-        </button>
-        <button
-          type="button"
-          onClick={() => setReportType('pnl')}
-          className={`py-2 px-1.5 rounded-lg font-semibold truncate transition-colors cursor-pointer text-center ${
-            reportType === 'pnl'
-              ? 'bg-blue-600 text-white shadow-xs'
-              : 'text-slate-600 dark:text-slate-400 hover:bg-white/60 dark:hover:bg-slate-800'
-          }`}
-          title={language === 'bn' ? 'আইটেম লাভ ও ক্ষতি' : 'Item Profit & Loss'}
-        >
-          {language === 'bn' ? 'লাভ-ক্ষতি (P&L)' : 'Item P&L'}
-        </button>
-        <button
-          type="button"
-          onClick={() => setReportType('party-ledger')}
-          className={`py-2 px-1.5 rounded-lg font-semibold truncate transition-colors cursor-pointer text-center ${
-            reportType === 'party-ledger'
-              ? 'bg-blue-600 text-white shadow-xs'
-              : 'text-slate-600 dark:text-slate-400 hover:bg-white/60 dark:hover:bg-slate-800'
-          }`}
-          title={language === 'bn' ? 'পার্টি লেজার ও স্টেটমেন্ট' : 'By Party Item & Transaction'}
-        >
-          {language === 'bn' ? 'পার্টি লেজার' : 'Party Ledger'}
-        </button>
-        {isPharmacyMode && (
+      {/* Active Report Button (Only the clicked Report appears) */}
+      <div className="flex items-center justify-between gap-2 p-1.5 bg-slate-100 dark:bg-slate-900/80 rounded-xl border border-slate-200 dark:border-slate-800 text-xs">
+        {reportType === 'summary' && (
+          <button
+            type="button"
+            onClick={() => setReportType('summary')}
+            className="py-2 px-4 rounded-lg font-semibold bg-blue-600 text-white shadow-xs cursor-pointer text-center"
+          >
+            {language === 'bn' ? 'স্টক সামারি' : 'Stock Summary'}
+          </button>
+        )}
+        {reportType === 'profit-loss' && (
+          <button
+            type="button"
+            onClick={() => setReportType('profit-loss')}
+            className="py-2 px-4 rounded-lg font-bold bg-emerald-600 text-white shadow-xs cursor-pointer text-center flex items-center gap-1.5"
+          >
+            <TrendingUp className="w-3.5 h-3.5 shrink-0" />
+            <span>Profit &amp; Loss</span>
+          </button>
+        )}
+        {reportType === 'low-stock' && (
+          <button
+            type="button"
+            onClick={() => setReportType('low-stock')}
+            className="py-2 px-4 rounded-lg font-semibold bg-amber-600 text-white shadow-xs cursor-pointer text-center"
+          >
+            {language === 'bn' ? 'স্টক অ্যালার্ট রিপোর্ট' : 'Low Stock Report'}
+          </button>
+        )}
+        {reportType === 'batch-report' && (
+          <button
+            type="button"
+            onClick={() => setReportType('batch-report')}
+            className="py-2 px-4 rounded-lg font-semibold bg-indigo-600 text-white shadow-xs cursor-pointer text-center"
+          >
+            {language === 'bn' ? 'ব্যাচ ও মেয়াদ রিপোর্ট' : 'Batch Report'}
+          </button>
+        )}
+        {reportType === 'ledger' && (
+          <button
+            type="button"
+            onClick={() => setReportType('ledger')}
+            className="py-2 px-4 rounded-lg font-semibold bg-blue-600 text-white shadow-xs cursor-pointer text-center"
+          >
+            {language === 'bn' ? 'আইটেম লেজার' : 'Item Ledger'}
+          </button>
+        )}
+        {reportType === 'item-sales' && (
+          <button
+            type="button"
+            onClick={() => setReportType('item-sales')}
+            className="py-2 px-4 rounded-lg font-semibold bg-blue-600 text-white shadow-xs cursor-pointer text-center"
+          >
+            {language === 'bn' ? 'আইটেম বিক্রয়' : 'Item Sales'}
+          </button>
+        )}
+        {reportType === 'item-purchase' && (
+          <button
+            type="button"
+            onClick={() => setReportType('item-purchase')}
+            className="py-2 px-4 rounded-lg font-semibold bg-blue-600 text-white shadow-xs cursor-pointer text-center"
+          >
+            {language === 'bn' ? 'আইটেম ক্রয়' : 'Item Purchase'}
+          </button>
+        )}
+        {reportType === 'pnl' && (
+          <button
+            type="button"
+            onClick={() => setReportType('pnl')}
+            className="py-2 px-4 rounded-lg font-semibold bg-blue-600 text-white shadow-xs cursor-pointer text-center"
+          >
+            {language === 'bn' ? 'লাভ-ক্ষতি (P&L)' : 'Item P&L'}
+          </button>
+        )}
+        {reportType === 'party-ledger' && (
+          <button
+            type="button"
+            onClick={() => setReportType('party-ledger')}
+            className="py-2 px-4 rounded-lg font-semibold bg-blue-600 text-white shadow-xs cursor-pointer text-center"
+          >
+            {language === 'bn' ? 'পার্টি লেজার' : 'Party Ledger'}
+          </button>
+        )}
+        {isPharmacyMode && reportType === 'generic-report' && (
           <button
             type="button"
             onClick={() => setReportType('generic-report')}
-            className={`py-2 px-1.5 rounded-lg font-semibold truncate transition-colors cursor-pointer text-center flex items-center justify-center gap-1 ${
-              reportType === 'generic-report'
-                ? 'bg-emerald-600 text-white shadow-xs'
-                : 'text-slate-600 dark:text-slate-400 hover:bg-white/60 dark:hover:bg-slate-800'
-            }`}
-            title={language === 'bn' ? 'জেনেরিক অনুযায়ী ঔষধ ও স্টক রিপোর্ট' : 'Generic Wise Medicine & Stock Report'}
+            className="py-2 px-4 rounded-lg font-semibold bg-emerald-600 text-white shadow-xs cursor-pointer text-center flex items-center gap-1.5"
           >
             <Pill className="w-3.5 h-3.5" />
             <span>{language === 'bn' ? 'জেনেরিক রিপোর্ট' : 'Generic Report'}</span>
@@ -2038,6 +2029,16 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ initialReportType = 's
 
       {/* GENERIC REPORT (Pharmacy Mode Only) */}
       {isPharmacyMode && reportType === 'generic-report' && <GenericReportView />}
+
+      {/* PROFIT & LOSS REPORT (Daily, Monthly, Date-to-Date) */}
+      {reportType === 'profit-loss' && (
+        <ProfitLossReportView
+          ref={profitLossReportRef}
+          globalStartDate={globalStartDate}
+          globalEndDate={globalEndDate}
+          onPeriodChange={handlePeriodChange}
+        />
+      )}
 
       {/* BATCH & EXPIRY REPORT */}
       {reportType === 'batch-report' && (
